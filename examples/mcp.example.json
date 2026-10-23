@@ -5,10 +5,9 @@
       "args": ["/opt/pi-mcp/src/server.mjs"],
       "env": {
         "PI_MCP_CONFIG": "/etc/pi-mcp/config.json",
-        "CORP_LLM_API_KEY": "<set in your own secret store, not here>",
-        "CORP_HTTP_PROXY": "http://proxy.corp.internal:8080",
-        "CORP_HTTPS_PROXY": "http://proxy.corp.internal:8080",
-        "CORP_NO_PROXY": "localhost,127.0.0.1,.corp.internal"
+        "CORP_HTTP_PROXY": "http://proxy.example.invalid:8080",
+        "CORP_HTTPS_PROXY": "http://proxy.example.invalid:8080",
+        "CORP_NO_PROXY": "localhost,127.0.0.1"
       }
     }
   }

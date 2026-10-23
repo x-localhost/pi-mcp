@@ -1,12 +1,17 @@
 {
   "providers": {
     "corporate": {
-      "models": {
-        "corporate-model": {
-          "baseUrl": "https://llm-gateway.corp.internal/v1",
-          "apiKey": "$CORP_LLM_API_KEY"
+      "baseUrl": "https://llm-gateway.corp.internal/v1",
+      "api": "openai-completions",
+      "apiKey": "$CORP_LLM_API_KEY",
+      "models": [
+        {
+          "id": "corporate-model",
+          "name": "Corporate model",
+          "contextWindow": 128000,
+          "maxTokens": 8192
         }
-      }
+      ]
     }
   }
 }

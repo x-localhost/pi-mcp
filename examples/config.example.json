@@ -1,6 +1,6 @@
 {
-  "piPath": "/opt/pi-coding-agent/dist/bundle/cli.js",
-  "piArgs": [],
+  "piPath": "/usr/local/bin/node",
+  "piArgs": ["/opt/pi-mcp/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"],
   "stateDir": "/var/lib/pi-mcp/state",
   "allowedRoots": ["/home/corp-user/workspace"],
   "maxConcurrent": 2,
@@ -9,15 +9,14 @@
   "defaultMaxTurns": 30,
   "provider": "corporate",
   "model": "corporate-model",
-  "agentDir": "./agent",
   "modelsFile": "./models.example.json",
-  "allowedCommands": ["git", "npm"],
+  "allowedCommands": ["npm test", "git status --short"],
   "envAllowlist": ["CORP_LLM_API_KEY"],
   "network": {
     "httpProxyEnv": "CORP_HTTP_PROXY",
     "httpsProxyEnv": "CORP_HTTPS_PROXY",
     "noProxyEnv": "CORP_NO_PROXY",
-    "caFile": "./corp-ca.pem",
-    "npmRegistry": "https://npm.corp.internal/"
+    "caFile": "/etc/ssl/certs/company-root-ca.pem",
+    "npmRegistry": "https://npm.example.invalid/"
   }
 }

@@ -1,119 +1,96 @@
-# pi-mcp 사내망(corporate) 설정 가이드
+# pi-mcp 사내 환경 설치 가이드
 
-이 문서는 `src/config.mjs`가 읽는 `pi-mcp` 설정 파일(`PI_MCP_CONFIG`)을
-사내 프록시/CA/내부 npm 레지스트리 환경에서 구성하는 방법을 설명합니다.
-실제 회사 엔드포인트/자격증명으로의 연결은 아직 검증되지 않았으며, 이
-문서는 연결이 실제로 동작함을 주장하지 않습니다.
+이 안내는 사내 프록시, 인증서, npm 레지스트리를 사용하는 환경에서
+pi-mcp를 설치하고 MCP 호스트에 등록하는 기본 절차입니다. 회사의 실제
+주소와 인증 정보는 관리자에게 확인하고 승인된 값을 사용하세요. 이
+예시는 회사 네트워크 연결을 검증한 결과가 아닙니다.
 
-## 설정 파일 구조
+## 1. 사전 준비
 
-예시: `examples/config.example.json`. 주요 필드:
-
-- `piPath` (절대경로, 필수): 실행할 Pi CLI 엔트리포인트. 공식
-  `@earendil-works/pi-coding-agent`(1.4.0, Node ≥ 22.19 요구) npm 패키지를
-  설치했다면 보통 해당 패키지의 `dist/bundle/cli.js`를 가리킵니다.
-  `piArgs`는 `node <piPath> <piArgs...>` 형태로 실행할 때 추가 인자가
-  필요한 경우에만 사용합니다.
-- `stateDir`, `allowedRoots` (절대경로, 필수): 런타임(core)이 작업 상태와
-  허용된 저장소 루트를 관리하는 경로입니다. 이 설정 유닛은 경로 유효성만
-  검증하며, 실제 격리/락 처리는 core가 담당합니다.
-- `provider`/`model`: Pi에게 사용할 공급자/모델을 지정합니다. `provider`를
-  설정하면 `model`도 반드시 함께 설정해야 합니다.
-- `agentDir`, `modelsFile`, `authFile`: 설정 파일 기준 상대경로 또는
-  절대경로. `modelsFile`은 Pi 자체의 `models.json` 형식(예:
-  `examples/models.example.json`)을 가리키며, 이 유닛은 그 내용을 해석하지
+- Node.js **22.19 이상**을 준비합니다.
+- 승인된 경로에 이 `pi-mcp` 프로젝트를 clone하거나 배포본을 복사합니다.
+- Git 저장소 인증은 회사에서 승인한 Git helper 또는 SSH agent로
+  준비합니다. pi-mcp는 저장소를 자동으로 clone하거나 원격에 push하지
   않습니다.
-- `allowedCommands`, `envAllowlist`: 런타임이 추가 허용할 셸 명령과, 자식
-  프로세스로 전달할 환경변수 **이름**의 화이트리스트입니다. 값 자체는
-  설정 파일에 넣지 않고, 실행 시점의 프로세스 환경에서만 읽습니다.
-- `network`: 아래에서 설명합니다.
+- 내부 npm 레지스트리, 프록시 주소, 회사 CA 인증서 경로와 LLM 게이트웨이
+  주소/API 키 전달 방법을 관리자에게 확인합니다.
 
-## 프록시(network.*ProxyEnv)
+## 2. 의존성 설치
 
-`HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, `ALL_PROXY`/
-`all_proxy`, `NO_PROXY`/`no_proxy`는 (대소문자 구분 없이) 설정 없이도
-현재 프로세스 환경에 있으면 자동으로 자식 프로세스에 전달됩니다.
+`PI_MCP_CONFIG`는 서버 실행 시 읽히므로 초기 `npm ci` 설정에 영향을 주지
+않습니다. 설치 전에 현재 셸에 회사에서 안내한 네트워크 값을 설정합니다.
+아래 값은 형식 예시이며 실제 값을 넣어야 합니다.
 
-사내 프록시 값이 표준 이름이 아닌 별도 변수(예: `CORP_HTTP_PROXY`)에
-있다면 `network.httpProxyEnv`처럼 **변수 이름**을 지정하세요. 이렇게
-지정한 변수는 반드시 실행 시점 환경에 존재해야 하며(없으면 오류), 그
-값이 표준 `HTTP_PROXY`/`http_proxy` 양쪽에 매핑되어 기존 표준값을
-덮어씁니다.
+```sh
+export HTTPS_PROXY='http://proxy.example.invalid:8080'
+export HTTP_PROXY='http://proxy.example.invalid:8080'
+export NO_PROXY='localhost,127.0.0.1'
+export NODE_EXTRA_CA_CERTS='/path/to/company-root-ca.pem'
+export GIT_SSL_CAINFO='/path/to/company-root-ca.pem'
+export npm_config_cafile='/path/to/company-root-ca.pem'
+export npm_config_registry='https://npm.example.invalid/'
+git clone 'https://git.example.invalid/approved/pi-mcp.git' /opt/pi-mcp
+cd /opt/pi-mcp
+npm ci --ignore-scripts
+```
 
-이 HTTP 프록시 전송 경로는 LLM API의 `baseUrl`(예:
-`models.json`의 `providers.<p>.models.<m>.baseUrl`)과는 별개입니다.
-프록시는 네트워크 전송 계층을 바꾸고, `baseUrl`은 어떤 엔드포인트로
-요청을 보낼지를 바꿉니다. 두 개념을 혼동하지 마세요.
+프록시와 게이트웨이 `baseUrl`은 서로 다른 설정입니다. `HTTP_PROXY`와
+`HTTPS_PROXY`는 Pi의 HTTP 전송 경로에 사용됩니다. `ALL_PROXY`는 환경을
+통해 Git 및 도구에 전달될 수 있지만, 이것만으로 Pi 요청이 프록시를
+통한다고 가정하지 마세요. `NO_PROXY`의 문법과 적용 방식은 도구마다
+다를 수 있으므로 회사에서 안내한 값을 사용하세요.
 
-## 사내 CA / 내부 npm 레지스트리
+## 3. 설정 파일 준비
 
-`network.caFile`을 설정하면 Git, npm, Node(Pi 포함)가 모두 같은 사내
-루트 CA를 신뢰하도록 `GIT_SSL_CAINFO`, `npm_config_cafile`,
-`NODE_EXTRA_CA_CERTS`에 동시에 전달됩니다. `network.npmRegistry`는
-`npm_config_registry`로 전달되어 내부 레지스트리를 가리킵니다.
+`examples/config.example.json`을 복사해 승인된 위치에 두고 경로와 값을
+수정합니다. `examples/models.example.json`은 Pi 1.4.0의 `models.json`
+형식 예시입니다. `provider`, `model`, 게이트웨이 `baseUrl` 및 모델 ID를
+실제 환경에 맞춥니다.
 
-- `network.npmRegistry`에는 자격증명(userinfo, 예:
-  `https://user:pass@registry...`)을 **넣을 수 없습니다**. npm 인증은
-  기존에 사용 중인 사용자 `.npmrc`/자격증명 설정을 그대로 사용하도록
-  문서화되어 있으며, 이 설정 파일은 레지스트리 URL만 지정합니다.
-- 어떤 설정으로도 TLS 검증을 비활성화할 수 없습니다. `NODE_TLS_REJECT_UNAUTHORIZED`
-  같은 값은 자식 프로세스 환경에 절대 전달되지 않습니다.
+`piPath`는 Pi 프로세스를 시작할 실행 파일이고, `piArgs`는 그 실행 파일에
+전달할 인자입니다. 예시처럼 `piPath`를 `/usr/local/bin/node`로
+두고 `piArgs`에 설치된 Pi CLI 번들 경로를 지정할 수 있습니다. 또는
+`piPath`를 Pi CLI의 실행 가능한 경로로 직접 지정하고 `piArgs`를 비워둘
+수 있습니다. 설치 위치에 맞게 경로를 바꾸세요.
 
-## envAllowlist로 전달하는 공급자/게이트웨이 자격증명
+`allowedCommands`에는 `npm test`, `git status --short`처럼 허용할 명령의
+정확한 문자열을 적습니다. `git`이나 `npm`만 적으면 그 문자열만 허용되며,
+인자가 붙은 명령은 허용되지 않습니다. `envAllowlist`에는 전달할 비밀
+변수의 이름만 적습니다. 예시의 `CORP_LLM_API_KEY` 값은 설정 파일이나
+MCP 등록 파일에 쓰지 말고, MCP 호스트가 상속하는 보안 환경 또는 회사의
+비밀 주입 기능으로 공급하세요. 변수의 존재 여부는 인증 성공을 보장하지
+않습니다.
 
-`envAllowlist`에 이름을 올린 환경변수만, 그리고 그 이름이 실행 시점
-환경에 실제로 존재할 때만 자식 프로세스에 전달됩니다(예:
-`CORP_LLM_API_KEY`). 다음과 같은 이름은 보안상 이유로 허용되지
-않습니다(화이트리스트에 올려도 설정 검증에서 거부됨):
+`network.*ProxyEnv`에는 실제 프록시 값이 아니라 환경변수 이름을
+지정합니다. MCP 호스트 실행 환경에 해당 변수를 제공해야 합니다.
+`network.caFile`과 `network.npmRegistry`는 각 회사가 승인한 CA 파일
+경로와 레지스트리 주소로 바꿉니다. 레지스트리 URL에 사용자명이나
+비밀번호를 포함하지 마세요.
 
-- `PATH`, `HOME`, `SSH_AUTH_SOCK`, `ENV`, `BASH_ENV`
-- `NODE_*`, `LD_*`, `DYLD_*` (동적 로더/Node 런타임 주입 벡터)
-- `PI_*` (Pi 내부 동작을 재정의할 수 있는 변수, 예: 에이전트 디렉터리)
-- `GIT_CONFIG_*` (git config 주입 벡터)
-- 표준 프록시/CA/npm 제어 변수(`HTTP_PROXY` 등, `GIT_SSL_CAINFO`,
-  `npm_config_cafile`, `npm_config_registry`, `npm_config_strict_ssl`) —
-  이 값들은 `network.*` 필드를 통해서만 제어합니다.
+## 4. MCP 호스트에 등록하고 실행
 
-## Git 자격증명 / SSH
+`examples/mcp.example.json`의 서버 항목을 MCP 호스트 설정에 복사하고,
+`PI_MCP_CONFIG`를 실제 설정 파일의 절대경로로 바꿉니다. `command`는
+`node`, `args`는 설치 경로의 `/opt/pi-mcp/src/server.mjs`를 가리키는
+예시입니다. 호스트가 `CORP_LLM_API_KEY`와 프록시 변수를 보안 방식으로
+상속하도록 설정하세요. 프록시가 필요 없다면 프록시 변수와 설정 항목을
+제거할 수 있습니다.
 
-자식 프로세스 환경에는 일반적인 Git 자격증명 helper와 SSH agent가
-동작하도록 `HOME`, `SSH_AUTH_SOCK`, `PATH`(없으면 보수적인 기본값
-`/usr/bin:/bin`), `LANG`, `LC_ALL`이 항상 전달됩니다. 그 외의 호스트
-환경변수는 명시적으로 선택(`envAllowlist`, `network.*`)하지 않는 한
-전달되지 않습니다.
-
-## OAuth 자격증명 가져오기에 대한 중요한 주의사항
-
-Pi는 OAuth 로그인을 지원하지만, **기존에 로그인된 OAuth 토큰을 복사해서
-pi-mcp 전용 상태 디렉터리에서 재사용하는 것은 위험합니다.** 같은 OAuth
-세션(리프레시 토큰)을 pi-mcp와 일반 Pi CLI가 동시에 사용하면, 한쪽이
-토큰을 갱신할 때 다른 쪽의 토큰을 원격으로 무효화시킬 수 있습니다. 즉,
-평소 터미널에서 쓰던 Pi 로그인이 예고 없이 로그아웃될 수 있습니다.
-
-따라서:
-
-- pi-mcp가 OAuth 자격증명을 가져오려면, 그 자격증명을 **pi-mcp 전용으로
-  독점 소유**하거나(다른 곳에서 동시에 쓰지 않음), **별도로 인증한
-  pi-mcp 전용 세션**을 사용해야 합니다.
-- 가능하다면 OAuth 가져오기보다 **회사 LLM 게이트웨이의 API 키를
-  `envAllowlist`로 전달하는 방식**(이 문서의 "envAllowlist" 절)을
-  권장합니다. API 키 방식은 토큰 갱신 경쟁 문제가 없습니다.
-
-## 런타임이 보장하는 것 / 보장하지 않는 것
-
-이 설정 유닛(`src/config.mjs`)은 설정 값의 검증, 자식 프로세스 환경
-구성, 비밀값 마스킹, 진단(health) 정보 제공만 담당합니다. 실제 작업
-디렉터리/에이전트 디렉터리 격리, 공유 상태 디렉터리 락, 1회 시딩되는
-auth/models 파일 관리, 프로젝트 신뢰/확장(ambient extensions, MCP,
-skills) 제외, 세션 재개 검증 등은 core(runtime) 레이어의 책임이며, 이
-문서는 그 내부 동작을 보장하지 않습니다. 정확한 동작은 core의 문서를
+MCP 호스트가 서버를 stdio 방식으로 시작하도록 설정한 뒤 연결 상태를
+확인하세요. 프로젝트의 7개 MCP 도구와 각 도구의 동작은 README를
 참고하세요.
 
-## 7개 MCP 도구와의 관계
+회사 저장소의 실제 작업은 승인된 경로와 Git 인증 방식으로 수행하세요.
+설정의 `allowedRoots`는 작업을 허용할 경로를 지정합니다. 이 설정이나
+pi-mcp가 운영체제 수준의 샌드박스를 제공한다고 간주하지 마세요. 승인된
+스크립트는 파일 정책이 제한하는 범위보다 더 많은 작업을 수행할 수
+있으므로 신뢰하는 저장소와 명령만 허용하세요. 상태, 작업 공간,
+세션 파일은 비공개로 유지하고 다른 사용자와 공유하지 마세요.
 
-`pi_health`는 이 유닛의 `healthConfig()` 결과(실행파일/설정/자격증명
-"존재 여부"만, 값은 없음)를 사용할 수 있지만, 자격증명이 존재한다는
-것이 실제 인증에 성공한다는 증거는 아닙니다. `pi_delegate`/`pi_followup`
-등 나머지 도구는 `buildChildEnv()`가 구성한 환경으로 Pi 프로세스를
-실행하는 core 레이어에서 소비합니다. 이 문서는 사내망 설정 측면만
-다루며, 각 도구의 입력/출력 스키마는 core 문서를 참고하세요.
+## OAuth 자격증명 주의
+
+일반 Pi와 pi-mcp가 같은 OAuth 세션의 refresh token을 동시에 사용하면,
+한쪽의 갱신이 다른 쪽 세션을 원격에서 무효화할 수 있습니다. OAuth를
+사용할 때는 pi-mcp 전용으로 독점 소유하는 자격증명이나 별도 로그인
+세션을 사용하세요. 가능한 경우 게이트웨이 API 키를 보안 환경으로
+전달하는 방법을 사용하면 이 토큰 경쟁을 피할 수 있습니다.
