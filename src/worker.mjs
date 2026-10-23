@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { RpcClient } from './rpc.mjs';
 import { atomicJson, git } from './manager.mjs';
 import { sanitize } from './sanitize.mjs';
+import { scanTemplate, validateProviderHeaders } from './headers.mjs';
 
 process.umask(0o077);
 const exec = promisify(execFile);
@@ -20,19 +21,26 @@ const sessionRoot = await fs.realpath(job.sessionDir);
 let child, rpc, stopping, finalText = '', settled = false, finalStopReason, providerError = '', stderr = '', logBytes = 0;
 const stopTimers = [];
 const secretValues = [];
-const collectSecrets = (value, key = '', sensitive = false) => {
-  if (typeof value === 'string' && (sensitive || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
-    let foundReference = false;
-    const resolved = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (match, braced, bare) => {
-      const replacement = process.env[braced || bare];
-      if (typeof replacement !== 'string') return match;
-      foundReference = true;
-      if (replacement.length >= 6) secretValues.push(replacement);
-      return replacement;
-    });
-    if (resolved.length >= 6 && (foundReference || !/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value))) secretValues.push(resolved);
+// A value reached through a "headers" map is treated as secret regardless of
+// length (even 1-5 characters), since arbitrary custom header names cannot be
+// recognized by the generic token/key/secret/... name pattern below. Uses the
+// same $$ / $! / $NAME / ${NAME} grammar as src/headers.mjs so an escaped
+// literal is never mistaken for an unresolved (and then leaked) reference.
+const collectSecrets = (value, key = '', sensitive = false, headerSourced = false) => {
+  if (typeof value === 'string' && (sensitive || headerSourced || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
+    let resolved = '';
+    for (const part of scanTemplate(value)) {
+      if (part.type === 'literal') { resolved += part.text; continue; }
+      const replacement = process.env[part.name];
+      if (typeof replacement !== 'string') continue;
+      if (headerSourced || replacement.length >= 6) secretValues.push(replacement);
+      resolved += replacement;
+    }
+    if (resolved && (headerSourced || resolved.length >= 6)) secretValues.push(resolved);
+  } else if (value && typeof value === 'object') {
+    const childHeaderSourced = headerSourced || /headers?/i.test(key);
+    for (const [childKey, entry] of Object.entries(value)) collectSecrets(entry, childKey, sensitive || /headers?/i.test(key), childHeaderSourced);
   }
-  else if (value && typeof value === 'object') for (const [childKey, entry] of Object.entries(value)) collectSecrets(entry, childKey, sensitive || /headers?/i.test(key));
 };
 const refreshSecrets = async () => {
   for (const name of ['auth.json', 'models.json']) {
@@ -107,6 +115,12 @@ async function run() {
   const { stdout: version } = await exec(runtime.piPath, [...runtime.piArgs, '--version'], { timeout: 10000, env: process.env });
   if (!/\b1\.4\.0\b/.test(version)) throw new Error(`Unsupported Pi version: ${version.trim()}`);
   if (stopping) throw new Error(`Stopped during startup: ${stopping}`);
+  // Revalidate owned header configuration against this process's own forwarded
+  // environment right before spawning Pi, since the environment could differ
+  // from whatever Manager.start() observed earlier for this job.
+  const readOwnedJson = async name => { try { return JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); } catch { return null; } };
+  validateProviderHeaders({ modelsConfig: await readOwnedJson('models.json'), authConfig: await readOwnedJson('auth.json'),
+    provider: job.provider, model: job.model, childEnv: process.env });
   const nonce = randomUUID(); const readyFile = path.join(dir, 'policy-ready.json');
   const policyFile = path.join(dir, 'policy.json');
   await atomicJson(policyFile, { nonce, readyFile, denyFile: path.join(dir, 'denials.jsonl'), worktree: job.worktree, mode: job.mode, allowedCommands: runtime.allowedCommands });

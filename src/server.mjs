@@ -43,7 +43,7 @@ server.registerTool('pi_result', {
 }, wrap(args => manager.result(args.job_id)));
 server.registerTool('pi_list', {
   description: 'List recent jobs across MCP connections.', inputSchema: { limit: z.number().int().min(1).max(50).default(10) }, annotations: { readOnlyHint: true, openWorldHint: false }
-}, wrap(async args => (await manager.all()).slice(0, args.limit).map(job => manager.public(job))));
+}, wrap(async args => Promise.all((await manager.all()).slice(0, args.limit).map(job => manager.public(job)))));
 server.registerTool('pi_cancel', {
   description: 'Request cancellation while preserving the worktree and artifacts.', inputSchema: { job_id: id }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
 }, wrap(args => manager.cancel(args.job_id)));

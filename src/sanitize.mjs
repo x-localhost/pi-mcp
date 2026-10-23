@@ -1,5 +1,12 @@
 export function sanitize(value, env = process.env, extraSecrets = []) {
-  const secrets = [...Object.entries(env).filter(([key, val]) => /(?:token|key|secret|password|proxy|auth|credential)/i.test(key) && typeof val === 'string' && val.length >= 6).map(([, val]) => val), ...extraSecrets].filter(v => typeof v === 'string' && v.length >= 6);
+  // Generic env-named secrets keep a length floor so common short strings
+  // elsewhere aren't globally treated as secret; explicit extraSecrets (e.g.
+  // values resolved from a models.json "headers" map) are known by context to
+  // be secret and are masked at any length, including 1-5 characters.
+  const secrets = [
+    ...Object.entries(env).filter(([key, val]) => /(?:token|key|secret|password|proxy|auth|credential)/i.test(key) && typeof val === 'string' && val.length >= 6).map(([, val]) => val),
+    ...extraSecrets.filter(v => typeof v === 'string' && v.length >= 1),
+  ];
   for (const [key, raw] of Object.entries(env)) {
     if (!/proxy/i.test(key) || typeof raw !== 'string') continue;
     try {
@@ -12,6 +19,15 @@ export function sanitize(value, env = process.env, extraSecrets = []) {
       }
     } catch {}
   }
+  // Also redact each secret's JSON-escaped form (e.g. embedded quotes/newlines)
+  // so a secret surviving inside a JSON.stringify'd message is still caught,
+  // and sort longest-first so a short secret can never partially consume a
+  // longer overlapping one and leave a fragment of it exposed.
+  for (const secret of [...secrets]) {
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    if (escaped !== secret) secrets.push(escaped);
+  }
+  secrets.sort((a, b) => b.length - a.length);
   const clean = item => {
     if (typeof item === 'string') {
       let result = item.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@').replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]');

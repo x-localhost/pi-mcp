@@ -5,6 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sanitize } from './sanitize.mjs';
+import { validateProviderHeaders, allHeaderRefNames } from './headers.mjs';
 
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -100,9 +101,41 @@ export class Manager {
     }));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
-  public(job) {
+  async public(job) {
     const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'createdAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'diffStat', 'changedFiles'];
-    return sanitize(Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key, job[key]])), this.childEnv);
+    return sanitize(Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key, job[key]])), this.childEnv, await this.headerSecretValues());
+  }
+  agentSourcePath(name, explicit) {
+    return explicit || (this.config.agentDir ? path.join(this.config.agentDir, name) : null);
+  }
+  // Prefers the already-seeded/owned copy (what Pi will actually use, and for
+  // auth.json what seedAgent intentionally preserves even if the source later
+  // changes) and falls back to the configured source before the first seed.
+  async loadAgentJson(name, explicit) {
+    const owned = path.join(this.agentDir, name);
+    if (await fs.stat(owned).then(stat => stat.isFile(), () => false)) return JSON.parse(await fs.readFile(owned, 'utf8'));
+    const source = this.agentSourcePath(name, explicit);
+    if (!source || !await fs.stat(source).then(stat => stat.isFile(), () => false)) return null;
+    return JSON.parse(await fs.readFile(source, 'utf8'));
+  }
+  async validateHeaders(provider, model) {
+    const [modelsConfig, authConfig] = await Promise.all([
+      this.loadAgentJson('models.json', this.config.modelsFile),
+      this.loadAgentJson('auth.json', this.config.authFile),
+    ]);
+    if (modelsConfig) rejectCommands(modelsConfig);
+    if (authConfig) rejectCommands(authConfig);
+    validateProviderHeaders({ modelsConfig, authConfig, provider, model, childEnv: this.childEnv });
+  }
+  async headerSecretValues() {
+    const modelsConfig = await this.loadAgentJson('models.json', this.config.modelsFile).catch(() => null);
+    if (!modelsConfig) return [];
+    const values = [];
+    for (const name of allHeaderRefNames(modelsConfig)) {
+      const value = this.childEnv[name];
+      if (typeof value === 'string' && value) values.push(value);
+    }
+    return values;
   }
   async seedAgent() {
     for (const [explicit, name] of [[this.config.modelsFile, 'models.json'], [this.config.authFile, 'auth.json']]) {
@@ -137,9 +170,12 @@ export class Manager {
         const existing = jobs.find(job => job.requestId === input.request_id);
         if (existing) {
           if (existing.requestHash !== requestHash) throw new Error('request_id already used with different inputs');
-          return this.public(existing);
+          return await this.public(existing);
         }
       }
+      // Preflight before any fresh job/worktree allocation, and on every submission
+      // (including followups) so an environment change cannot bypass this check.
+      await this.validateHeaders(provider, model);
       if (jobs.filter(job => active.has(job.status)).length >= this.config.maxConcurrent) throw new Error('Concurrency limit reached');
       if (parent && jobs.some(job => active.has(job.status) && job.worktree === parent.worktree)) throw new Error('Worktree already active');
       const timeoutSeconds = input.timeout_seconds ?? this.config.defaultTimeoutSeconds;
@@ -185,7 +221,7 @@ export class Manager {
           await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
           child.unref(); await fs.writeFile(path.join(dir, 'worker.pid'), String(child.pid), { mode: 0o600 });
         }
-        return { ...this.public(job), artifactsDir: dir };
+        return { ...await this.public(job), artifactsDir: dir };
       } catch (error) {
         await atomicJson(path.join(dir, 'job.json'), { ...job, status: 'failed', error: error.message, finishedAt: now() });
         throw error;
@@ -200,16 +236,17 @@ export class Manager {
       const pid = job.workerPid || marker;
       const current = ['starting', 'running'].includes(job.status) && pid && !alive(pid) ? await this.recover(job)
         : job.status === 'starting' && !pid && Date.now() - Date.parse(job.createdAt) > 15000 ? await this.recover(job) : job;
-      if (!active.has(current.status) || Date.now() >= until) return this.public(current);
+      if (!active.has(current.status) || Date.now() >= until) return await this.public(current);
       await sleep(400);
     }
   }
   async result(id) {
     const job = await this.status(id); const dir = this.jobDir(id);
+    const headerSecrets = await this.headerSecretValues();
     const tail = async (name, max) => {
       const handle = await fs.open(path.join(dir, name), 'r').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
       if (!handle) return '';
-      try { const stat = await handle.stat(); const buf = Buffer.alloc(Math.min(max, stat.size)); await handle.read(buf, 0, buf.length, stat.size - buf.length); return sanitize(buf.toString('utf8'), this.childEnv); }
+      try { const stat = await handle.stat(); const buf = Buffer.alloc(Math.min(max, stat.size)); await handle.read(buf, 0, buf.length, stat.size - buf.length); return sanitize(buf.toString('utf8'), this.childEnv, headerSecrets); }
       finally { await handle.close(); }
     };
     return { ...job, result: await tail('result.txt', 24000), stderrTail: await tail('stderr.log', 4000), diffPreview: await tail('changes.patch', 24000), artifactsDir: dir,
