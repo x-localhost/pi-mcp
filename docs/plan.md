@@ -1,5 +1,7 @@
 # Pi MCP implementation plan — 2026-10-23
 
+Current follow-on scope: [gaps 3–8 completion plan](completion-plan.md), based on clean main `edf7285` on 2026-10-24.
+
 ## Scope and evidence
 
 The starting directory was empty (no repository, files, or project guidance). Initial committed main is `2de0a49d1989429a29e794f782b9e41e0a449ffa`. User requested Pi coding-agent use through MCP in a corporate proxy environment and Claude Code MCP feature parity. Pending optional clarification, parity means the installed `claude_delegator` seven-tool service, not every Claude product feature or downstream MCP connector.

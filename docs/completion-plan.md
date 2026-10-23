@@ -1,0 +1,54 @@
+# Pi / Pi-MCP gaps 3–8 — 2026-10-24
+
+## Scope, base and ownership
+
+User authorized completion of analysis items 3–8: complete artifacts, queued jobs and safe recovery, explicit verification, interactive controls and approved MCP, offline project preparation, diagnostics and budgets/retention. Actual corporate endpoint acceptance and per-user OS isolation (items 1–2) remain outside this change. Preserve the existing isolated profile: agent network none; no host repository/state/socket directory mounts; no general proxy, ambient extensions, or ambient MCP.
+
+Committed main base: `edf7285bd8ae559d5a3250b4c07075ce681c20e2`. Main and existing worktrees were inspected; main is clean. Integration: `/Users/leebw/workspace/claude/pi-mcp-worktrees/completion`, branch `codex/completion/integration`. Lead writes this coordination artifact and reviews/integrates; implementations are delegated. Existing worktrees are preserved.
+
+Before launch: native `/root/design_review`, `/root/internal_gateway`, `/root/internal_regression` all completed; Claude health reports activeJobs=0, authenticated and roots permitted. No recursive delegation. Maximum three active delegates, at most two Claude jobs. Use native GPT-6 Sol high for the three security/concurrency/cross-module units below; their breadth exceeds bounded Sonnet implementation. An independent Astra design review precedes behavior implementation.
+
+## Common contracts
+
+- Backward compatible existing tools; new strict schemas and bounded inputs. Only administrator configuration enables commands, MCP servers, elevated bounds and offline material locations. Jobs cannot supply commands, endpoints or executable paths. Keep Pi 1.4.0 and existing pinned dependencies.
+- Central runtime owner owns `src/{config,manager,worker,server,rpc}.mjs`, runtime helper modules, corresponding existing tests and new lifecycle/control tests. Other units must not edit these files. Central config adds strict optional `queue`, `verification`, `budgets`, `retention`, `artifacts`, `approvedMcp` sections, using other units' exported validators. Unknown keys rejected.
+- Artifact unit owns `src/artifacts.mjs`, `src/offline-materials.mjs`, import/export/offline scripts and examples, their tests and report. Gateway/MCP unit owns `src/approved-mcp.mjs`, `src/policy{,-extension}.mjs`, `internal-agent/{gateway,relay,profile}.mjs`, gateway/profile/checker tests, `scripts/check-internal-agent.py` and its own fixtures/report. Coordinate new top-level config keys with runtime owner; no concurrent editing of shared files.
+- Independent units start from the committed plan based on main, in dedicated absolute worktrees on `codex/completion/{runtime,artifacts,gateway}`. Parent reviews and commits each unit, integrates artifacts then gateway then runtime. Runtime may consume reviewed commits or specified module contracts, not silently depend on another dirty checkout.
+
+## 3. Artifacts and export
+
+Persist immutable job artifact snapshots only after writers stop, including tracked diff, changed/new regular-file contents and deleted-file metadata, result and verification output. Manifest has version, bounded entry IDs/relative paths, sizes, SHA-256, encoding, redaction/omission reasons, completeness and truncation flags. Never follow symlinks, special files, `.git`, or caller-supplied paths. Reject or explicitly mark artifacts exceeding configured file/total/count bounds; never silently truncate a purported complete export. Detect mutation during snapshot and do not claim consistency.
+
+Module contract: `validateArtifactConfig(raw)` returns normalized bounded config; `snapshotArtifacts({jobDir, worktree, baseCommit, config, sanitize, env})` returns a manifest/summary; `listArtifacts(jobDir, {cursor, limit})` and `readArtifact(jobDir, {artifact_id, offset, length})` return bounded pages with digests/next offset. Hashes describe exported bytes, not pre-redaction source; text secrets are redacted and secret-bearing binary content is omitted. Internal export writes an explicitly selected manifest bundle via stdout; a host script saves to a new file only, verifies all hashes, and never extracts arbitrary paths. Full output is obtainable with pages; preview truncation is explicit.
+
+## 4. Queue, recovery and maintenance
+
+Bounded persistent FIFO queue; selected committed base frozen at submission, wall timeout starts at admission, queue expiry separately bounded. Detached dispatcher continues after MCP disconnect. Cross-process lock, request-id deduplication and worktree exclusion also cover queued/fork/followup jobs. Queued cancellation does not spawn a worker.
+
+`pi_recover` inspects or recovers quarantined jobs only after validating Linux boot ID/process start identity and tracked process groups. Never signal a numeric PID alone; ambiguous ownership remains quarantined. Persist identity before model work. Recovery and cleanup are serialized against admission and return concrete evidence. On unsupported platforms, fail closed where ownership cannot be proved. `pi_cleanup` has dry-run default, explicit terminal job IDs/retention filters, refuses active/referenced jobs, removes only validated owned state/worktrees, and preserves source repositories. Worktree/branch removal must match recorded ownership; no generic recursive arbitrary path cleanup.
+
+## 5. Verification
+
+Separate execution and verification status, even when the model says tests passed. `verification.commands` are administrator named exact commands, bounded timeout/output; job inputs select IDs only. Run after Pi writers stop, within the same confinement profile and managed process group. Record command ID, exit/signal, elapsed time, output artifact, truncation, timeout/cancel; all selected commands must actually exit 0 for `passed`. No commands => `not_requested`; execution failure => explicit skipped reason. Verified result must describe the final artifact snapshot. No paid/company model calls or invented quality benchmark.
+
+## 6. Controls and approved MCP
+
+Add `pi_events` with persistent bounded sanitized events and cursor/gap semantics; `pi_steer` through worker-owned acknowledged bounded IPC queue; bounded inline image attachments (supported MIME/magic/base64/size) on delegate/followup/steer. No remote URL images. Add `pi_fork` from a terminal job's captured Pi session with separate session/worktree and a deliberate snapshot of its changes; reject incomplete/unsafe snapshots, preserve source job, prohibit concurrent writes. Clarify conversation branch and Git snapshot semantics.
+
+Approved MCP is an explicit bridge in the trusted policy extension while keeping `--no-mcp` for ambient configuration. `validateApprovedMcp(raw)` returns administrator-only server/tool declarations. `registerApprovedMcp(pi, policy)` connects approved servers and registers only declared tools under stable `mcp__<server>__<tool>` names; exported helper supplies exact tool names for worker readiness. Read-only mode requires explicit administrator review-tool allowlist, not server annotations alone. Reject undeclared tools and server-initiated sampling/elicitation; bound tool schemas/results/timeouts/concurrency; propagate cancellation and close transports. Tool inputs are untrusted. Stdio servers are approved immutable image-packaged commands, no ambient env/secrets or repo `.pi/mcp.json`. For isolated internal HTTP tools, use fixed private HTTPS endpoint/IP/CA/header routes through the existing gateway socket, with method/tool filtering and no general forwarding, redirects, incoming credential forwarding, or unrestricted server callbacks. Support bounded stateless Streamable HTTP JSON requests; document unsupported legacy/stateful modes honestly. Keep ordinary no-MCP configuration unchanged.
+
+## 7. Offline development
+
+Provide a bounded manifest + hashed blob input format for approved dependency/material trees (including materialized LFS files/submodule contents), with safe path handling, no symlinks/hardlinks/devices, no Git administration, explicit new staging destination and digest validation before use. Host packer is read-only to the source and rejects unsafe files. Material is data, never a runtime install command. Bind material manifests to source commit and attach only explicitly selected packages to new worktrees; no automatic network install, hooks or recursive fetch. Supply a project-image recipe pinned to the base image, and allow read-only root image-packaged tools/caches without weakening mount/network checks. Tests execute an offline fixture build using imported dependencies, and reject malicious paths/digests/links. State actual supported sizes and toolchain responsibility.
+
+## 8. Diagnostics and limits
+
+Gateway emits structured safe categories for auth/rate-limit/TLS/connect/timeout/upstream errors, request IDs, elapsed time and bounded metadata audit logs; never upstream bodies, header values, prompts or credentials. Enforce output token and `n` bounds plus request-rate/concurrency caps; classify without following redirects. Per-job worker token/cost budgets use observed usage, stop with explicit budget status, and report unsupported/unknown cost instead of promising a hard monetary cap. Account for in-flight overshoot; per-request gateway caps complement it.
+
+Disk/storage admission uses bounded scanning and conservative fail-closed policy; expose usage and retention candidates. Retention cleanup is opt-in/dry-run, with exports/followup/session references protected. These are application controls, not filesystem hard quotas. Audit/event/output files themselves have limits and explicit gaps/truncation.
+
+## Verification, resources and completion
+
+All install/build/suites/services run on reachable `gram`, Docker `node:24.22.0-bookworm`, under `/tmp/pi-mcp-completion-20261024/<unit>` with unique names. No local install/build/test suite, published ports, paid endpoints, shared-host changes or live global MCP/settings changes. Use existing package pins. Each implementer records focused RED (missing behavior) then GREEN, exact files/commands/results and remaining limits. Parent static reviews and commits, then an independent Sol tester uses a committed integration SHA and own worktree. Include complete node:test regression, actual Pi mock API/tool roundtrip, MCP stdio controls/artifacts, offline build, queue disconnect/recovery, malicious imports, credential redaction and real Docker network denial. Final independent Astra review covers correctness and boundary preservation. Scoped work commits + bounded separate handoff commit, then fast-forward clean local main; no push/publication/deployment.
+
+Completion means each item has executable, exercised user flows, documented configuration and honest bounds. Real corporate API acceptance and per-user OS isolation remain explicitly pending outside 3–8.
