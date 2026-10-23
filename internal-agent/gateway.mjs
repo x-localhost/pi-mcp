@@ -15,6 +15,7 @@ const IDLE_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONFIG_KEYS = new Set(['upstreamUrl', 'upstreamAddress', 'model', 'caFile', 'headers']);
 const RESERVED_HEADERS = /^(?:host|content-length|content-type|connection|transfer-encoding|upgrade|proxy-.*|x-forwarded-.*|forwarded|via|te|trailer|keep-alive|accept-encoding|expect|http2-settings)$/i;
+const UNSAFE_ENV_REF = /^(?:NODE_|LD_|DYLD_|GIT_CONFIG(?:_|$)|NPM_|PI_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$|HOME$|PATH$|SHELL$|BASH_ENV$|ENV$|SSH_AUTH_SOCK$|OPENSSL_CONF$|SSL_CERT_FILE$|SSL_CERT_DIR$)/i;
 const HEADER_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const MODEL_ID = /^[^\x00-\x1f\x7f]{1,120}$/;
 const invalidConfig = () => new Error('Invalid gateway configuration');
@@ -46,6 +47,7 @@ function resolveHeaders(headers, env) {
     for (const part of parts) {
       if (part.type === 'literal') value += part.text;
       else {
+        if (UNSAFE_ENV_REF.test(part.name)) throw invalidConfig();
         const secret = env[part.name];
         if (typeof secret !== 'string' || !secret || hasForbiddenBytes(secret)) throw invalidConfig();
         value += secret;
@@ -125,7 +127,7 @@ function validateSchemaRefs(value, depth = 0) {
   if (Array.isArray(value)) { for (const item of value) validateSchemaRefs(item, depth + 1); return; }
   if (!object(value)) return;
   for (const [key, child] of Object.entries(value)) {
-    if (key === '$ref' && (typeof child !== 'string' || !child.startsWith('#/'))) throw invalidChat();
+    if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) && (typeof child !== 'string' || !child.startsWith('#/'))) throw invalidChat();
     validateSchemaRefs(child, depth + 1);
   }
 }
@@ -138,9 +140,10 @@ function validateTools(tools) {
   }
 }
 
-const CHAT_KEYS = ['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'n', 'seed', 'frequency_penalty', 'presence_penalty', 'response_format', 'user', 'reasoning_effort'];
+const CHAT_KEYS = ['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'n', 'seed', 'frequency_penalty', 'presence_penalty', 'response_format', 'user', 'reasoning_effort', 'store'];
 export function validateChatBody(raw, model) {
   if (!exact(raw, CHAT_KEYS) || raw.model !== model) throw invalidChat();
+  if (raw.store !== undefined && raw.store !== false) throw invalidChat();
   validateMessages(raw.messages);
   if (raw.tools !== undefined) validateTools(raw.tools);
   if (raw.stream !== undefined && typeof raw.stream !== 'boolean') throw invalidChat();

@@ -36,6 +36,9 @@ test('configuration pins a private HTTPS target and resolves credentials only fr
   badConfig({ headers: { Authorization: '${BAD NAME}' } });
   badConfig({ headers: { Authorization: '$MISSING' } });
   badConfig({ headers: { Authorization: '$CORP_KEY\r\nBad: x' } });
+  for (const name of ['NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'GIT_CONFIG', 'GIT_CONFIG_COUNT', 'NPM_CONFIG_USERCONFIG', 'PI_CODING_AGENT_DIR', 'HTTPS_PROXY', 'HOME', 'PATH', 'SSH_AUTH_SOCK', 'OPENSSL_CONF', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) {
+    assert.throws(() => validateGatewayConfig({ ...base, headers: { Authorization: `$${name}` } }, { env: { [name]: 'unsafe' } }), /invalid gateway configuration/i);
+  }
 });
 
 test('CLI startup failure is generic and contains no config path or secret', () => {
@@ -64,6 +67,27 @@ test('chat request schema rejects routing, remote media and server tools', () =>
     { role: 'tool', tool_call_id: 'call_1', content: 'file contents' },
   ], tools: [{ type: 'function', function: { name: 'read_file', description: 'Read a local file', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }] };
   assert.deepEqual(validateChatBody(functionRoundTrip, 'corp-model'), functionRoundTrip);
+});
+
+test('Pi store:false is accepted but retention and unknown store values are rejected', () => {
+  const piBody = { ...body, store: false, max_completion_tokens: 512 };
+  assert.deepEqual(validateChatBody(piBody, 'corp-model'), piBody);
+  for (const store of [true, null, 'false', 0]) assert.throws(() => validateChatBody({ ...body, store }, 'corp-model'), /invalid chat request/i);
+});
+
+test('schema references stay within local fragments for all ref keywords', () => {
+  const tool = schema => ({ ...body, tools: [{ type: 'function', function: { name: 'read_file', parameters: schema } }] });
+  const format = schema => ({ ...body, response_format: { type: 'json_schema', json_schema: { name: 'answer', schema } } });
+  for (const keyword of ['$ref', '$dynamicRef', '$recursiveRef']) {
+    const local = { type: 'object', properties: { value: { [keyword]: '#/$defs/value' } }, $defs: { value: { type: 'string' } } };
+    assert.deepEqual(validateChatBody(tool(local), 'corp-model'), tool(local));
+    assert.deepEqual(validateChatBody(format(local), 'corp-model'), format(local));
+    for (const remote of ['https://outside.example/schema', '//outside.example/schema', 'other.json#/$defs/value']) {
+      const schema = { type: 'object', properties: { value: { [keyword]: remote } } };
+      assert.throws(() => validateChatBody(tool(schema), 'corp-model'), /invalid chat request/i);
+      assert.throws(() => validateChatBody(format(schema), 'corp-model'), /invalid chat request/i);
+    }
+  }
 });
 
 async function fixture(response = { statusCode: 200, headers: { 'content-type': 'text/event-stream', 'set-cookie': 'secret=1', location: 'https://evil.example' }, chunks: ['data: one\n\n', 'data: two\n\n'] }, rawConfig = base) {
