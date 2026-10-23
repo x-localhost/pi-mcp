@@ -40,3 +40,10 @@ On the committed core handoff `c2ee2a9ed634806af18450d00d2e92486dff90dd`, added 
 - Expanded RED after initial fixes: `node --test test/core.test.mjs test/manager.test.mjs test/lifecycle.test.mjs test/real-policy.test.mjs` on the same remote Docker host: 18 passed, 1 failed for a custom credential environment variable leaking in public text.
 - GREEN: the same focused command: 21 passed, 0 failed; actual Pi denied an `@`-normalized absolute write. A later `node --test test/lifecycle.test.mjs test/manager.test.mjs` GREEN: 15 passed, 0 failed, including a forced uncaught RPC listener exception while a child kept writing; cleanup stopped the writer before terminal status.
 - Full `npm test` after the first green pass: 117 passed, 0 failed; after the forced exception regression: 118 passed, 0 failed. A subsequent focused remote run covered a never-ready Pi deadline and accurate auth-source health: 17 passed, 0 failed. Final `npm test` on `gram` in Docker `node:24.22.0-bookworm`: **120 passed, 0 failed**. `git diff --check` passed locally.
+
+## Credential interpolation followup (same date)
+
+On parent-reviewed committed core `06b9f9bf17bdbbd46521bce121ef1c3be89a08dd`, worker redaction now resolves credential and header references using both `$NAME` and `${NAME}` forms, including references embedded in a larger string. The synthetic provider error echoes the value into public status/result fields and private result text to verify masking.
+
+- RED on `gram`: `node --test --test-name-pattern="braced and embedded model env references" test/lifecycle.test.mjs` in Docker `node:24.22.0-bookworm`: 0 passed, 1 failed; `${CORP_SESSION}` leaked in public status.
+- GREEN on `gram`: the same command: 1 passed, 0 failed. Focused regression `node --test --test-name-pattern="model env reference|braced and embedded" test/lifecycle.test.mjs`: 2 passed, 0 failed, covering plain, braced, and embedded forms.

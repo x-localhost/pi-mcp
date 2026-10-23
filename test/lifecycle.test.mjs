@@ -177,6 +177,25 @@ test('model env reference secret is absent from public and private result', asyn
   assert.equal(privateResult.includes(secret), false);
 });
 
+test('braced and embedded model env references redact result and status', async () => {
+  const secret = 'company-private-credential';
+  for (const reference of ['${CORP_SESSION}', 'prefix-${CORP_SESSION}']) {
+    const { manager, input } = await setup('secret_error');
+    manager.childEnv.CORP_SESSION = secret;
+    const modelsFile = path.join(path.dirname(manager.config.stateDir), 'models.json');
+    await fs.writeFile(modelsFile, JSON.stringify({ providers: { mock: { apiKey: reference, headers: { Authorization: reference } } } }));
+    manager.config.modelsFile = modelsFile;
+    const started = await manager.start(input);
+    const status = await finished(manager, started.id);
+    assert.equal(status.status, 'failed');
+    assert.equal(JSON.stringify(status).includes(secret), false, reference);
+    const result = await manager.result(started.id);
+    assert.equal(JSON.stringify(result).includes(secret), false, reference);
+    const privateResult = await fs.readFile(path.join(manager.jobDir(started.id), 'result.txt'), 'utf8');
+    assert.equal(privateResult.includes(secret), false, reference);
+  }
+});
+
 test('startup deadline remains timed_out when policy readiness never arrives', { timeout: 20000 }, async () => {
   const { manager, input } = await setup('never_ready');
   const started = await manager.start(input);

@@ -40,9 +40,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       send({ type: 'auto_retry_end', success: true });
     }
     send({ type: 'turn_start' });
-    const reply = scenario === 'secret_echo' ? process.env.CORP_SESSION : 'Fake Pi completed';
+    const reply = ['secret_echo', 'secret_error'].includes(scenario) ? `credential ${process.env.CORP_SESSION} header prefix-${process.env.CORP_SESSION}` : 'Fake Pi completed';
     if (scenario === 'secret_echo') process.stderr.write(`credential ${reply}\n`);
-    send({ type: 'message_end', message: { role: 'assistant', stopReason: scenario === 'provider_error' ? 'error' : 'stop', errorMessage: scenario === 'provider_error' ? 'mock provider failure' : undefined, content: [{ type: 'text', text: reply }], usage: { input: 1, output: 2 } } });
+    send({ type: 'message_end', message: { role: 'assistant', stopReason: ['provider_error', 'secret_error'].includes(scenario) ? 'error' : 'stop', errorMessage: scenario === 'provider_error' ? 'mock provider failure' : scenario === 'secret_error' ? reply : undefined, content: [{ type: 'text', text: reply }], usage: { input: 1, output: 2 } } });
     send({ type: 'agent_end' });
     setTimeout(() => send({ type: 'agent_settled' }), 350);
   }

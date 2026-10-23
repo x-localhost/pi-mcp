@@ -22,8 +22,15 @@ const stopTimers = [];
 const secretValues = [];
 const collectSecrets = (value, key = '', sensitive = false) => {
   if (typeof value === 'string' && (sensitive || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
-    const resolved = /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? process.env[value.slice(1)] : value;
-    if (typeof resolved === 'string' && resolved.length >= 6) secretValues.push(resolved);
+    let foundReference = false;
+    const resolved = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (match, braced, bare) => {
+      const replacement = process.env[braced || bare];
+      if (typeof replacement !== 'string') return match;
+      foundReference = true;
+      if (replacement.length >= 6) secretValues.push(replacement);
+      return replacement;
+    });
+    if (resolved.length >= 6 && (foundReference || !/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value))) secretValues.push(resolved);
   }
   else if (value && typeof value === 'object') for (const [childKey, entry] of Object.entries(value)) collectSecrets(entry, childKey, sensitive || /headers?/i.test(key));
 };
