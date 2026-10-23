@@ -1,25 +1,31 @@
 ## 현재 상태
 
-- 날짜: 2026-10-23 (Asia/Seoul). 사내 LLM 커스텀 헤더 구현·독립 검토·전체 회귀 검증 완료.
-- 최종 대상 체크아웃: `/Users/leebw/workspace/claude/pi-mcp`, 브랜치 `main`. 통합: `/Users/leebw/workspace/claude/pi-mcp-worktrees/corporate-headers`, `codex/corporate-headers/integration`.
-- 작업 HEAD: `b295bdb96ed0f00e5007ae30ba627b0e01e25c7c` (이 handoff 커밋 직전). 최종 코드 및 독립 검증 SHA: `52104b205e8c26fe0e9ca99c57da886209713bec`.
-- 호환 기준은 설치된 `claude_delegator`의 7개 도구이며, Claude Code 전체 제품 또는 `claude mcp serve` 전체 도구를 뜻하지 않음.
-- 구현: `pi_health`, `pi_delegate`, `pi_status`, `pi_result`, `pi_list`, `pi_cancel`, `pi_followup`; 전용 Git worktree, 비동기 실행, 중복 요청 방지, 동시성 제한, 세션 후속 작업, 취소와 결과 보존.
-- 사내 환경: 프록시, 회사 CA, 내부 npm 레지스트리, 모델 게이트웨이, 명시적 비밀 환경변수 전달. Pi 1.4.0과 의존성을 lockfile로 고정.
-- 추가 기능: provider/model/modelOverrides의 임의 HTTP 헤더 및 환경변수 치환, 커스텀 Authorization, 작업 생성 전과 Pi 실행 전 검증. 누락된 값·잘못된 문자·명령형 자격증명은 차단.
-- 보호: 짧은 값·복합 값·JSON 이스케이프·HTTP 공백 정규화·Bearer/URL 중첩 인증값 마스킹. 공개 자유 텍스트는 보호하고 작업 조회/취소용 제어 필드는 유지. 전용 auth.json 갱신값과 OAuth 환경 범위를 보존.
-- 검증: gram의 Node 24.22.0 컨테이너에서 최종 코드 전체 독립 회귀 **174/174 통과**, 실패·스킵 0. 네트워크를 비활성화한 컨테이너 내부 모의 API로 실제 Pi 헤더 전송·도구 호출·인증 우선순위와 프록시/CA·MCP 회귀를 확인.
-- 독립 Astra 최종 승인: 짧은 비밀값과 일반 인증 마스킹의 충돌, HTTP 공백 제거 후 값 노출 등 마지막 P2 두 건 해결. 최종 검증 이후 변경은 문서뿐임. 예제 JSON 3개 구문 및 diff 공백 검사 통과.
-- 근거: [헤더 계획 및 완료 기록](docs/corporate-headers-plan.md), [구현/TDD 기록](docs/corporate-headers-report.md), [최종 독립 회귀](docs/corporate-headers-regression.md). 초기 구현 검증은 [기존 회귀 기록](docs/regression-report.md) 참고.
-- 원격 테스트 컨테이너, 전용 이미지 및 gram의 `/tmp/pi-mcp-headers-20261023` 정리 완료. 보고서의 로그 경로는 당시 실행 기록이며, 결과 요약은 Git에 보존. 검토용 로컬 브랜치/worktree는 유지.
-- 미검증: 실제 사내 API 형식·필수 헤더·프록시 인증·CA 체인·저장소 인증. 회사 주소·자격증명이 없어 실제 사내망 연결은 하지 않음. OpenAI 호환 Chat Completions 및 모의 인증을 기준으로 구현.
-- 보안 한계: 파일/명령 정책은 OS 샌드박스가 아니며 프록시만으로 외부 통신이 차단되지 않음. 기존 Git hook/textconv 실행 및 허용 명령의 호스트 접근 문제는 이번 헤더 기능에서 해결하지 않음. 비공개 Pi 세션·작업 공간도 보호 필요.
-- 운영 한계: 종료 확인이 불가능한 작업은 격리되어 동시성 슬롯을 유지하며, 이 버전에 MCP 격리 해제 도구는 없음. OAuth는 pi-mcp 전용 자격증명을 사용.
-- 다음 단계: [설치 안내](docs/corporate-setup.md)의 헤더 설정에 실제 사내 헤더 이름을 적용하고 해당 환경변수를 `envAllowlist`에 등록. 승인된 CA·프록시·API URL·모델을 설정한 뒤 `pi_health`와 작은 review 작업으로 사내 인증·스트리밍·도구 호출을 검증. 비밀값은 파일/대화 대신 실행 환경으로 주입.
-- 실제 MCP/global 설정 변경, 원격 push, 배포, 게시 및 유료 모델 호출은 수행하지 않음.
-- 설계와 범위: [계획](docs/plan.md), [호환 범위](docs/parity.md), [운영 안내](docs/operations.md).
+- 날짜: 2026-10-23 (Asia/Seoul). 사내 전용 격리 Pi 에이전트 추가, 독립 보안 검토 및 전체 회귀 검증 완료.
+- 최종 대상 체크아웃: `/Users/leebw/workspace/claude/pi-mcp`, 브랜치 `main`. 통합 worktree: `/Users/leebw/workspace/claude/pi-mcp-worktrees/internal-agent`, `codex/internal-agent/integration`.
+- 기록 시점 작업 HEAD: `a464aed9ef396c548b703e1016300ea8a8fd2fdd` (이 handoff 커밋 직전). 독립 검증한 최종 소스 SHA: `69a30f66c4577d31827127a97aedb5cb512df1b3`; 이후 변경은 문서뿐임.
+- 새 `internal-agent` Docker 프로필: 전체 Pi/MCP/허용 명령을 network none, UID/GID1000, 읽기 전용 root, capability0, no-new-privileges, 기본 seccomp/LSM, 자원 제한 안에서 실행. 기본 호스트 실행 모드와 별도로 선택해야 함.
+- 통신: agent 루프백 → 읽기 전용 Unix 소켓 → 별도 gateway → 관리자가 승인한 고정 사설 IPv4/HTTPS 호스트/경로/모델 한 곳만 허용. DNS 우회·일반 프록시·외부 MCP·서버 검색 도구·원격 이미지 URL·리다이렉트는 차단. TLS 검증 유지.
+- 사내 LLM 커스텀 인증 헤더는 gateway 전용 환경 파일에서만 주입. agent에는 더미 키만 전달. Compose raw env 파일로 리터럴 `$` 보존, 실행 전 환경변수 이름·파일 권한 검사.
+- 호스트 저장소/상태/Home/SSH/Docker 소켓 마운트 없음. 별도 전용 볼륨에 선택한 커밋의 Git bundle(최대64MiB)을 표준입력으로 반입. 호스트 Git 설정·훅·미추적 파일·소켓은 반입하지 않음. 결과는 MCP 텍스트·diff로 검토.
+- 기존 7개 MCP 도구, Pi1.4.0 고정, 사내 LLM 임의 헤더·인증값 마스킹 및 일반 모드 프록시/CA 지원 유지. Claude Code 전체 기능 호환을 주장하지 않음.
+- 검증: gram 새 이미지/격리 환경에서 독립 전체 **190/190 통과**, 15 suites, 실패·취소·스킵0. 실제 Pi read 도구 호출, MCP 재연결·후속 작업·취소·gateway 누락 시작 거부 통과.
+- 보안 실행 검증: TCP/UDP/DNS/AF_VSOCK/프록시 우회 거부, Unix 소켓 삭제·이름 변경 거부, 금지 사설 서비스 요청0. 유효 CA200, CA 누락·TLS 호스트명 오류·302 redirect 각각502.
+- 독립 Astra 최종 소스 검토 승인, 차단할 결함 없음. 독립 agent 환경 검사와 부모의 환경/PID1 및 설정·작업·세션57파일 추가 검사에서 gateway 시험용 인증값 부재 확인.
+- 실행 안내: [사내 격리 프로필](docs/internal-agent.md). 근거: [설계·최종 검토](docs/internal-agent-plan.md), [gateway TDD](docs/internal-gateway-report.md), [runtime TDD/재현](docs/internal-runtime-report.md), [독립 회귀](docs/internal-agent-regression.md).
+- gram의 이 작업 전용 컨테이너·네트워크·볼륨·이미지·소스/설정 디렉터리 정리 완료. `/tmp/piinternal-regression-20261023-full-test.log`만 보존. 로컬 검토용 브랜치/worktree는 유지.
+- 미검증: 실제 회사 LLM API·인증 헤더·CA·네트워크 및 서버 측 검색/외부 라우팅 정책. 회사 주소·자격증명이 없어 실제 회사망 연결은 하지 않음.
+- 지원 조건: Linux Docker, Compose>=2.30, 승인된 사내 LLM까지 직접 HTTPS 경로. 포워드 프록시만으로 LLM에 도달하는 구성, 다른 API 형식은 추가 지원 필요. 현재 OpenAI 호환 Chat Completions만 지원.
+- 경계: 상위 Claude Code/MCP 클라이언트의 클라우드 통신, 승인 LLM 서버의 자체 외부 통신, Docker 관리자/호스트 root/커널 침해는 별도 통제 대상. 전용 볼륨 디스크 할당량 제한과 컨테이너 중지 후 작업 자동 재개는 제공하지 않음.
+- 다음 단계: 사내 관리자가 승인한 고정 IP·TLS 호스트·CA·모델·헤더 변수로 개별 설정 파일 준비 → preflight → 전용 Docker 프로필 실행 및 admission 검사 → 검토한 커밋 반입 → 별도 `pi-internal` MCP 등록 및 작은 review 작업으로 사내 수용 검사.
+- 실제 MCP/global 설정 변경, 원격 push, 배포, 게시, 유료 모델 호출은 수행하지 않음.
 
 ## 작업 기록
+
+### 2026-10-23 — 외부 접촉 차단 사내 Pi 에이전트
+- network none 전용 Docker 프로필, 고정 사내 LLM gateway, 인증 헤더 분리, 개인 볼륨 Git bundle 반입 추가.
+- 실제 Pi와 Docker 차단·TLS 검증, 독립 Astra 승인 및 전체 회귀190/190 통과.
+- 작업 `a464aed`, 최종 소스 `69a30f6`; 실행 안내와 재현·검증 기록 제공.
+- 시험용 원격 자원 정리, 로컬 main 반영 대상. 실제 사내 설정·수용 검사는 운영 환경에서 필요.
 
 ### 2026-10-23 — 사내 LLM 커스텀 헤더
 - 임의 provider/model 헤더, 환경변수 참조, 커스텀 Authorization과 사전 검증 추가.
