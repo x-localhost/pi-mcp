@@ -30,6 +30,7 @@ export function scanTemplate(value) {
       const close = value.indexOf('}', i + 2);
       const name = close !== -1 ? value.slice(i + 2, close) : null;
       if (name !== null && IDENT_FULL.test(name)) { flush(); parts.push({ type: 'ref', name }); i = close + 1; continue; }
+      if (close !== -1) { literal += value.slice(i, close + 1); i = close + 1; continue; }
       literal += ch; i++; continue;
     }
     if (next !== undefined && IDENT_START.test(next)) {
@@ -54,7 +55,7 @@ export function isValidHeaderName(name) {
 export function hasForbiddenBytes(value) {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f) return true;
+    if (code < 0x20 || code === 0x7f || code > 0xff) return true;
   }
   return false;
 }
@@ -127,6 +128,9 @@ export function validateProviderHeaders({ modelsConfig, authConfig, provider, mo
       if (!modelEntry || typeof modelEntry !== 'object') continue;
       validateHeaderMapSyntax(modelEntry.headers, `${providerId}/${modelEntry.id}`);
     }
+    for (const [modelId, override] of Object.entries(providerEntry.modelOverrides ?? {})) {
+      validateHeaderMapSyntax(override?.headers, `${providerId}/${modelId}`);
+    }
   }
   const selectedProvider = providers[provider];
   if (!selectedProvider || typeof selectedProvider !== 'object') return;
@@ -134,11 +138,12 @@ export function validateProviderHeaders({ modelsConfig, authConfig, provider, mo
   const credentialEnv = credential && credential.env && typeof credential.env === 'object' ? credential.env : {};
   checkHeaderMapEnv(selectedProvider.headers, { credentialEnv, childEnv });
   const selectedModel = Array.isArray(selectedProvider.models) ? selectedProvider.models.find(entry => entry && entry.id === model) : null;
-  if (selectedModel) {
-    // OAuth credential env is provider-scoped only; model headers fall back to the forwarded child env.
-    const modelCredentialEnv = credential && credential.type === 'oauth' ? {} : credentialEnv;
-    checkHeaderMapEnv(selectedModel.headers, { credentialEnv: modelCredentialEnv, childEnv });
-  }
+  // Pi merges the override first, then the custom model definition, before
+  // resolving model header references. Only the effective exact-name entry
+  // needs its environment variable; provider headers are resolved separately.
+  const modelCredentialEnv = credential && credential.type === 'oauth' ? {} : credentialEnv;
+  const modelHeaders = { ...selectedProvider.modelOverrides?.[model]?.headers, ...selectedModel?.headers };
+  checkHeaderMapEnv(modelHeaders, { credentialEnv: modelCredentialEnv, childEnv });
 }
 
 // Every header-referenced environment name across the whole file, used to
@@ -152,6 +157,41 @@ export function allHeaderRefNames(modelsConfig) {
     if (!providerEntry || typeof providerEntry !== 'object') continue;
     collectHeaderRefNames(providerEntry.headers, names);
     for (const modelEntry of Array.isArray(providerEntry.models) ? providerEntry.models : []) collectHeaderRefNames(modelEntry?.headers, names);
+    for (const override of Object.values(providerEntry.modelOverrides ?? {})) collectHeaderRefNames(override?.headers, names);
   }
   return names;
+}
+
+// Return every value that can reach a configured header, including literal and
+// compound values. Credential env follows Pi's provider/model scope rules.
+export function collectHeaderSecrets(modelsConfig, authConfig, childEnv = {}) {
+  const secrets = new Set();
+  const providers = modelsConfig?.providers;
+  if (!providers || typeof providers !== 'object') return [];
+  for (const [providerId, entry] of Object.entries(providers)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const credential = selectAuthCredential(authConfig, providerId);
+    const ownedEnv = credential?.env && typeof credential.env === 'object' ? credential.env : {};
+    const collect = (headers, credentialEnv) => {
+      if (!headers || typeof headers !== 'object') return;
+      for (const template of Object.values(headers)) {
+        if (typeof template !== 'string') continue;
+        let full = '';
+        let complete = true;
+        for (const part of scanTemplate(template)) {
+          if (part.type === 'literal') { full += part.text; continue; }
+          const resolved = resolveReference(part.name, credentialEnv, childEnv);
+          if (typeof resolved !== 'string' || !resolved) { complete = false; continue; }
+          full += resolved;
+          secrets.add(resolved);
+        }
+        if (complete && full) secrets.add(full);
+      }
+    };
+    collect(entry.headers, ownedEnv);
+    const modelEnv = credential?.type === 'oauth' ? {} : ownedEnv;
+    for (const model of Array.isArray(entry.models) ? entry.models : []) collect(model?.headers, modelEnv);
+    for (const override of Object.values(entry.modelOverrides ?? {})) collect(override?.headers, modelEnv);
+  }
+  return [...secrets];
 }

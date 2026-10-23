@@ -11,7 +11,7 @@
   "model": "corporate-model",
   "modelsFile": "./models.example.json",
   "allowedCommands": ["npm test", "git status --short"],
-  "envAllowlist": ["CORP_LLM_API_KEY", "CORP_LLM_HEADER_API_KEY", "CORP_LLM_CLIENT_ID", "CORP_LLM_PROJECT_ID", "CORP_LLM_MODEL_VARIANT"],
+  "envAllowlist": ["CORP_LLM_API_KEY", "CORP_LLM_HEADER_API_KEY", "CORP_LLM_CLIENT_ID"],
   "network": {
     "httpProxyEnv": "CORP_HTTP_PROXY",
     "httpsProxyEnv": "CORP_HTTPS_PROXY",

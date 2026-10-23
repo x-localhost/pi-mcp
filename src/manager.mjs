@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sanitize } from './sanitize.mjs';
-import { validateProviderHeaders, allHeaderRefNames } from './headers.mjs';
+import { validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
 
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -103,7 +103,10 @@ export class Manager {
   }
   async public(job) {
     const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'createdAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'diffStat', 'changedFiles'];
-    return sanitize(Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key, job[key]])), this.childEnv, await this.headerSecretValues());
+    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'createdAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage']);
+    const secrets = await this.headerSecretValues();
+    return Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key,
+      trusted.has(key) ? job[key] : sanitize(job[key], this.childEnv, secrets)]));
   }
   agentSourcePath(name, explicit) {
     return explicit || (this.config.agentDir ? path.join(this.config.agentDir, name) : null);
@@ -113,10 +116,22 @@ export class Manager {
   // changes) and falls back to the configured source before the first seed.
   async loadAgentJson(name, explicit) {
     const owned = path.join(this.agentDir, name);
-    if (await fs.stat(owned).then(stat => stat.isFile(), () => false)) return JSON.parse(await fs.readFile(owned, 'utf8'));
+    const isFile = async file => {
+      try { return (await fs.stat(file)).isFile(); }
+      catch (error) { if (error.code === 'ENOENT') return false; throw new Error(`Invalid ${name} configuration`); }
+    };
+    if (await isFile(owned)) return this.parseAgentJson(owned, name);
     const source = this.agentSourcePath(name, explicit);
-    if (!source || !await fs.stat(source).then(stat => stat.isFile(), () => false)) return null;
-    return JSON.parse(await fs.readFile(source, 'utf8'));
+    if (!source) return null;
+    if (!await isFile(source)) {
+      if (explicit) throw new Error(`Invalid ${name} configuration`);
+      return null;
+    }
+    return this.parseAgentJson(source, name);
+  }
+  async parseAgentJson(file, name) {
+    try { return JSON.parse(await fs.readFile(file, 'utf8')); }
+    catch { throw new Error(`Invalid ${name} configuration`); }
   }
   async validateHeaders(provider, model) {
     const [modelsConfig, authConfig] = await Promise.all([
@@ -130,19 +145,15 @@ export class Manager {
   async headerSecretValues() {
     const modelsConfig = await this.loadAgentJson('models.json', this.config.modelsFile).catch(() => null);
     if (!modelsConfig) return [];
-    const values = [];
-    for (const name of allHeaderRefNames(modelsConfig)) {
-      const value = this.childEnv[name];
-      if (typeof value === 'string' && value) values.push(value);
-    }
-    return values;
+    const authConfig = await this.loadAgentJson('auth.json', this.config.authFile).catch(() => null);
+    return collectHeaderSecrets(modelsConfig, authConfig, this.childEnv);
   }
   async seedAgent() {
     for (const [explicit, name] of [[this.config.modelsFile, 'models.json'], [this.config.authFile, 'auth.json']]) {
       const source = explicit || (this.config.agentDir && await fs.stat(path.join(this.config.agentDir, name)).then(() => true, () => false) ? path.join(this.config.agentDir, name) : null);
       if (!source) continue;
       const target = path.join(this.agentDir, name);
-      rejectCommands(JSON.parse(await fs.readFile(source, 'utf8')));
+      rejectCommands(await this.parseAgentJson(source, name));
       const existing = await fs.stat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
       if (existing) {
         if (name === 'models.json' && sha(await fs.readFile(source)) !== sha(await fs.readFile(target))) throw new Error('models.json changed; explicit pi-mcp agent reset required after jobs stop');
@@ -213,7 +224,9 @@ export class Manager {
         if (!parent) await git(repository, ['worktree', 'add', '-b', branch, worktree, baseCommit], false, this.childEnv);
         await this.seedAgent();
         await atomicJson(path.join(dir, 'runtime.json'), { piPath: this.config.piPath, piArgs: this.config.piArgs || [],
-          agentDir: this.agentDir, allowedCommands: this.config.allowedCommands || [], policyExtension: path.join(codeRoot, 'src', 'policy-extension.mjs') });
+          agentDir: this.agentDir, allowedCommands: this.config.allowedCommands || [], policyExtension: path.join(codeRoot, 'src', 'policy-extension.mjs'),
+          ownedModelsRequired: !!await fs.stat(path.join(this.agentDir, 'models.json')).then(() => true, () => false),
+          ownedAuthRequired: !!await fs.stat(path.join(this.agentDir, 'auth.json')).then(() => true, () => false) });
         if (this.spawnWorker) {
           const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'worker.mjs'), dir], {
             cwd: codeRoot, detached: true, stdio: 'ignore', env: { ...this.childEnv, PI_CODING_AGENT_DIR: this.agentDir }

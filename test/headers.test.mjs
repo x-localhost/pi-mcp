@@ -11,6 +11,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Manager } from '../src/manager.mjs';
+import { referencedNames } from '../src/headers.mjs';
+import { sanitize } from '../src/sanitize.mjs';
 
 async function repoSetup(prefix) {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -48,6 +50,113 @@ async function assertRejectsBeforeSideEffects(manager, repository, input, patter
 
 const baseInput = { title: 'Header test', prompt: 'Say hello.', provider: 'corp', model: 'corp-model' };
 const baseModel = { id: 'corp-model', name: 'Corp model', contextWindow: 8192, maxTokens: 512 };
+
+test('a closed invalid braced template remains wholly literal', () => {
+  assert.deepEqual(referencedNames('${bad-$NOT_A_REFERENCE}'), []);
+});
+
+test('an unclosed braced template still finds a later environment reference', async () => {
+  assert.deepEqual(referencedNames('${unclosed $LATER'), ['LATER']);
+  const { tmp, repository } = await repoSetup('pi-headers-unclosed-');
+  const manager = await makeManager(tmp, { corp: { headers: { 'X-Trace': '${unclosed $LATER' }, models: [baseModel] } });
+  await assertRejectsBeforeSideEffects(manager, repository, { ...baseInput, repository }, /LATER|environment/i);
+});
+
+test('non Latin-1 literal and resolved header values reject before job allocation', async () => {
+  for (const [headers, env] of [[{ 'X-Trace': '한글' }, {}], [{ 'X-Trace': '$KOREAN' }, { KOREAN: '한글' }]]) {
+    const { tmp, repository } = await repoSetup('pi-headers-bytes-');
+    const manager = await makeManager(tmp, { corp: { headers, models: [baseModel] } }, env);
+    await assertRejectsBeforeSideEffects(manager, repository, { ...baseInput, repository }, /header|byte/i);
+  }
+});
+
+test('modelOverrides header syntax and selected environment are validated', async () => {
+  for (const headers of [{ 'Bad Header': 'literal' }, { 'X-Override': '$MISSING_OVERRIDE' }]) {
+    const { tmp, repository } = await repoSetup('pi-headers-override-');
+    const manager = await makeManager(tmp, { corp: { models: [baseModel], modelOverrides: { 'corp-model': { headers } } } });
+    await assertRejectsBeforeSideEffects(manager, repository, { ...baseInput, repository }, /header|environment/i);
+  }
+});
+
+test('unused modelOverrides references do not block another model', async () => {
+  const { tmp, repository } = await repoSetup('pi-headers-unused-override-');
+  const manager = await makeManager(tmp, { corp: { models: [baseModel, { ...baseModel, id: 'other' }],
+    modelOverrides: { other: { headers: { 'X-Other': '$MISSING_OTHER' } } } } });
+  assert.equal((await manager.start({ ...baseInput, repository })).status, 'starting');
+});
+
+test('a model definition replaces the same exact-name modelOverrides header before resolution', async () => {
+  const { tmp, repository } = await repoSetup('pi-headers-model-merge-');
+  const manager = await makeManager(tmp, { corp: { models: [{ ...baseModel, headers: { 'X-Model': 'defined-value' } }],
+    modelOverrides: { 'corp-model': { headers: { 'X-Model': '$MISSING_REPLACED' } } } } });
+  assert.equal((await manager.start({ ...baseInput, repository })).status, 'starting');
+});
+
+test('explicit short secrets preserve trusted task controls and repeated placeholders', async () => {
+  const { tmp, repository } = await repoSetup('pi-headers-short-controls-');
+  const manager = await makeManager(tmp, { corp: { headers: { 'X-Short': '$SHORT' }, models: [baseModel] } }, { SHORT: 'a' });
+  for (const secret of ['a', '1']) {
+    manager.childEnv.SHORT = secret;
+    const started = await manager.start({ ...baseInput, repository, title: secret });
+    const raw = await manager.read(started.id);
+    assert.equal(started.id, raw.id);
+    assert.match(started.id, /^task-[0-9a-f-]{36}$/);
+    assert.equal(started.title, '[redacted]');
+    assert.equal((await manager.status(started.id)).id, raw.id);
+    assert.equal((await manager.cancel(started.id)).id, raw.id);
+  }
+  assert.equal(sanitize(sanitize('a', {}, ['a']), {}, ['a']), '[redacted]');
+  assert.equal(sanitize('a1 aa', {}, ['a', 'a1']), '[redacted] [redacted][redacted]');
+  assert.deepEqual(sanitize({ id: '1', path: '1' }, {}, ['1']), { id: '[redacted]', path: '[redacted]' });
+  assert.equal(sanitize(JSON.stringify({ text: 'quote"part' }), {}, ['quote"part']), '{"text":"[redacted]"}');
+});
+
+test('known complete header secrets redact before generic Bearer masking', () => {
+  assert.equal(sanitize('Bearer abc"def', {}, ['abc"def']), 'Bearer [redacted]');
+  assert.equal(sanitize('Bearer abc def', {}, ['abc def']), 'Bearer [redacted]');
+  assert.equal(sanitize('Bearer abc\\"def', {}, ['abc"def']), 'Bearer [redacted]');
+  assert.equal(sanitize('Bearer [redacted]suffix', {}, ['[redacted]suffix']), 'Bearer [redacted]');
+});
+
+test('malformed source JSON fails generically before job or worktree creation', async () => {
+  const { tmp, repository } = await repoSetup('pi-headers-bad-source-');
+  const manager = await makeManager(tmp, { corp: { models: [baseModel] } });
+  await fs.writeFile(manager.config.modelsFile, '{"providers":{"corp":{"headers":{"X-Key":"private-fragment"},');
+  await assertRejectsBeforeSideEffects(manager, repository, { ...baseInput, repository }, /^Error: Invalid models\.json configuration$/);
+});
+
+test('malformed or missing owned models/auth JSON fails worker closed before Pi starts', { timeout: 20000 }, async () => {
+  const fake = fileURLToPath(new URL('./fixtures/fake-pi.mjs', import.meta.url));
+  await fs.chmod(fake, 0o755);
+  for (const [name, remove] of [['models.json', false], ['auth.json', false], ['models.json', true], ['auth.json', true]]) {
+    const { tmp, repository } = await repoSetup('pi-headers-bad-owned-');
+    const manager = await makeManager(tmp, { corp: { models: [baseModel] } }, { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8' },
+      { corp: { type: 'api_key', key: 'unused' } });
+    manager.config.piPath = fake;
+    const started = await manager.start({ ...baseInput, repository });
+    if (remove) await fs.rm(path.join(manager.agentDir, name));
+    else await fs.writeFile(path.join(manager.agentDir, name), '{"private":"secret-fragment",');
+    execFileSync(process.execPath, [fileURLToPath(new URL('../src/worker.mjs', import.meta.url)), manager.jobDir(started.id)],
+      { env: { ...manager.childEnv, PI_CODING_AGENT_DIR: manager.agentDir }, timeout: 10000 });
+    const raw = await manager.read(started.id);
+    assert.equal(raw.status, 'failed');
+    assert.match(raw.error, new RegExp(`Invalid owned ${name} configuration`));
+    assert.equal(JSON.stringify(raw).includes('secret-fragment'), false);
+    assert.equal(await fs.stat(path.join(manager.jobDir(started.id), 'policy.json')).then(() => true, () => false), false);
+  }
+});
+
+test('literal and saved credential header values redact from a fresh manager result', async () => {
+  const { tmp, repository } = await repoSetup('pi-headers-credential-redact-');
+  const manager = await makeManager(tmp, { corp: { headers: { 'X-One': 'literal-secret', 'X-Two': 'pre-$CRED_ONLY-post' }, models: [baseModel] } }, {},
+    { corp: { type: 'api_key', key: 'unused', env: { CRED_ONLY: 'saved-secret' } } });
+  const started = await manager.start({ ...baseInput, repository });
+  await fs.writeFile(path.join(manager.jobDir(started.id), 'result.txt'), 'literal-secret pre-saved-secret-post saved-secret');
+  const fresh = await new Manager(manager.config, manager.childEnv, { spawnWorker: false }).init();
+  const result = await fresh.result(started.id);
+  assert.equal(JSON.stringify(result).includes('literal-secret'), false);
+  assert.equal(JSON.stringify(result).includes('saved-secret'), false);
+});
 
 const invalidProviderHeaderCases = [
   ['rejects a header name containing whitespace', { 'Bad Header': 'value' }, {}, /header/i],

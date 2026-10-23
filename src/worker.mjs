@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { RpcClient } from './rpc.mjs';
 import { atomicJson, git } from './manager.mjs';
 import { sanitize } from './sanitize.mjs';
-import { scanTemplate, validateProviderHeaders } from './headers.mjs';
+import { scanTemplate, validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
 
 process.umask(0o077);
 const exec = promisify(execFile);
@@ -43,9 +43,11 @@ const collectSecrets = (value, key = '', sensitive = false, headerSourced = fals
   }
 };
 const refreshSecrets = async () => {
+  const configs = {};
   for (const name of ['auth.json', 'models.json']) {
-    try { collectSecrets(JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8'))); } catch {}
+    try { configs[name] = JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); collectSecrets(configs[name]); } catch {}
   }
+  secretValues.push(...collectHeaderSecrets(configs['models.json'], configs['auth.json'], process.env));
 };
 await refreshSecrets();
 const clean = value => sanitize(value, process.env, secretValues);
@@ -118,8 +120,13 @@ async function run() {
   // Revalidate owned header configuration against this process's own forwarded
   // environment right before spawning Pi, since the environment could differ
   // from whatever Manager.start() observed earlier for this job.
-  const readOwnedJson = async name => { try { return JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); } catch { return null; } };
-  validateProviderHeaders({ modelsConfig: await readOwnedJson('models.json'), authConfig: await readOwnedJson('auth.json'),
+  const readOwnedJson = async (name, required) => {
+    let content;
+    try { content = await fs.readFile(path.join(runtime.agentDir, name), 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT' && !required) return null; throw new Error(`Invalid owned ${name} configuration`); }
+    try { return JSON.parse(content); } catch { throw new Error(`Invalid owned ${name} configuration`); }
+  };
+  validateProviderHeaders({ modelsConfig: await readOwnedJson('models.json', runtime.ownedModelsRequired), authConfig: await readOwnedJson('auth.json', runtime.ownedAuthRequired),
     provider: job.provider, model: job.model, childEnv: process.env });
   const nonce = randomUUID(); const readyFile = path.join(dir, 'policy-ready.json');
   const policyFile = path.join(dir, 'policy.json');

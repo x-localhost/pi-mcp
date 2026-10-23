@@ -22,15 +22,22 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 test('released Pi 1.4.0 forwards configured custom headers and existing Bearer auth to the mock gateway', { timeout: 30000 }, async () => {
   let requests = 0;
-  let observedHeaders;
+  const observedHeaders = [];
   const gateway = http.createServer(async (req, res) => {
     requests++;
-    observedHeaders = req.headers;
+    observedHeaders.push(req.headers);
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
-    JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'Header round trip completed.' }, finish_reason: null }] }) + '\n\n');
-    res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\n');
+    if (requests === 1) {
+      assert.ok(body.tools.some(tool => tool.function?.name === 'read'));
+      res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call-read', type: 'function', function: { name: 'read', arguments: '{"path":"AGENTS.md"}' } }] }, finish_reason: null }] }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }) + '\n\n');
+    } else {
+      assert.ok(body.messages.some(message => message.role === 'tool' && JSON.stringify(message).includes('Test only')));
+      res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'Header round trip completed.' }, finish_reason: null }] }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\n');
+    }
     res.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => gateway.listen(0, '127.0.0.1', resolve));
@@ -44,22 +51,26 @@ test('released Pi 1.4.0 forwards configured custom headers and existing Bearer a
     await fs.writeFile(modelsFile, JSON.stringify({ providers: { mock: {
       baseUrl: `http://127.0.0.1:${gateway.address().port}/v1`, api: 'openai-completions', apiKey: '$MOCK_API_KEY',
       headers: { 'X-Corp-Client': '$CORP_CLIENT_ID', 'X-Corp-Trace': 'trace-${CORP_TRACE_ID}' },
+      modelOverrides: { mock: { headers: { 'x-corp-client': '$CORP_OVERRIDE', 'X-Corp-Override': '$CORP_OVERRIDE' } } },
       models: [{ id: 'mock', name: 'Mock', contextWindow: 8192, maxTokens: 512, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }]
     } } }));
     const manager = await new Manager({ stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], maxConcurrent: 1, defaultTimeoutSeconds: 15, maxTimeoutSeconds: 60,
       defaultMaxTurns: 2, piPath: process.execPath, piArgs: [cli], modelsFile, allowedCommands: [] },
-      { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', MOCK_API_KEY: 'test-only-key', CORP_CLIENT_ID: 'client-42', CORP_TRACE_ID: 'trace-99' }).init();
+      { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', MOCK_API_KEY: 'test-only-key', CORP_CLIENT_ID: 'client-42', CORP_TRACE_ID: 'trace-99', CORP_OVERRIDE: 'override-7' }).init();
     const start = await manager.start({ repository, title: 'Real Pi header round trip', prompt: 'Respond briefly.', provider: 'mock', model: 'mock' });
     let status;
     for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['starting', 'running'].includes(status.status)) break; await pause(100); }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(start.id)));
-    assert.equal(requests, 1);
+    assert.equal(requests, 2);
     // Normal Bearer compatibility: a configured apiKey still produces Pi's own
     // Authorization header when no custom Authorization header overrides it.
-    assert.equal(observedHeaders.authorization, 'Bearer test-only-key');
+    for (const headers of observedHeaders) {
+      assert.equal(headers.authorization, 'Bearer test-only-key');
     // Multiple custom headers, including an embedded ${NAME} reference, reach the request.
-    assert.equal(observedHeaders['x-corp-client'], 'client-42');
-    assert.equal(observedHeaders['x-corp-trace'], 'trace-trace-99');
+      assert.equal(headers['x-corp-client'], 'override-7');
+      assert.equal(headers['x-corp-trace'], 'trace-trace-99');
+      assert.equal(headers['x-corp-override'], 'override-7');
+    }
   } finally { await new Promise(resolve => gateway.close(resolve)); }
 });
 

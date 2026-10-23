@@ -27,12 +27,13 @@ export function sanitize(value, env = process.env, extraSecrets = []) {
     const escaped = JSON.stringify(secret).slice(1, -1);
     if (escaped !== secret) secrets.push(escaped);
   }
-  secrets.sort((a, b) => b.length - a.length);
+  const ordered = [...new Set([...secrets, '[redacted]'])].sort((a, b) => b.length - a.length);
+  const escapedPattern = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const secretPattern = new RegExp(ordered.map(escapedPattern).join('|'), 'g');
   const clean = item => {
     if (typeof item === 'string') {
-      let result = item.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@').replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]');
-      for (const secret of secrets) result = result.split(secret).join('[redacted]');
-      return result;
+      const knownMasked = item.replace(secretPattern, match => match === '[redacted]' ? match : '[redacted]');
+      return knownMasked.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@').replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]');
     }
     if (Array.isArray(item)) return item.map(clean);
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, val]) => [key,

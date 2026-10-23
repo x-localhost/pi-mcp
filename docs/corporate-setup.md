@@ -74,25 +74,35 @@ MCP 등록 파일에 쓰지 말고, MCP 호스트가 상속하는 보안 환경 
 ## 3.1 사내 전용 HTTP 헤더 (`headers`)
 
 사내 LLM 게이트웨이가 `Authorization` 외에 임의의 이름을 가진 추가
-헤더(예: `X-API-Key`, `X-Client-Id`, `X-Project-Id`)를 요구하는 경우,
+헤더(예: `X-API-Key`, `X-Client-Id`)를 요구하는 경우,
 `models.example.json`처럼 provider 또는 개별 model의 `headers` 객체에
 헤더 이름과 `$NAME`/`${NAME}` 형태의 환경변수 참조를 적습니다. 실제
 비밀 값은 파일에 적지 말고, 참조한 이름을 `envAllowlist`에 추가해
-MCP 호스트가 상속하는 환경에서 전달하세요. 모델별 `headers`는 같은
-provider의 다른 모델에는 적용되지 않으며, provider 헤더와 같은
-이름을 다시 쓰면 그 모델에서만 provider 값을 덮어씁니다.
+MCP 호스트가 상속하는 환경에서 전달하세요. 모델별 헤더는 `models[]`의
+해당 모델에 `headers`를 넣거나, 기존 모델을 수정할 때
+`modelOverrides: { "모델 ID": { "headers": { ... } } }`를 provider 안에
+넣습니다. 같은 이름이면 모델 헤더가 provider 헤더를 덮어씁니다.
+Pi는 provider 헤더를 먼저 해석하므로 덮어쓸 provider 헤더의 참조도
+유효해야 합니다.
 
 헤더 값은 Pi 1.4.0의 치환 규칙을 그대로 따릅니다. `$NAME`과
 `${NAME}`은 환경변수를 참조하고, `$$`는 문자 그대로의 `$`, `$!`는
 문자 그대로의 `!`로 치환됩니다. 참조한 환경변수가 전달되는 환경에
-없거나 빈 문자열이면 pi-mcp는 실제 요청을 보내기 전에 작업 시작을
-거부합니다. 오류 메시지에는 헤더 이름과 환경변수 이름만 나타나며
-실제 값은 절대 포함되지 않습니다.
+없거나 빈 문자열이면 pi-mcp는 작업 시작을 거부합니다. 헤더 이름/값과
+치환된 값은 Latin-1 범위여야 하며 제어 문자(탭 포함)는 거부됩니다.
+오류 메시지는 헤더
+이름과 환경변수 이름만 표시하고 비밀 값은 표시하지 않습니다.
 
 `apiKey`를 설정하면 Pi가 기본적으로 `Authorization: Bearer <apiKey>`
 헤더를 보냅니다. `headers`에 직접 `Authorization`을 지정하면 그 값이
 우선 적용되는 것을 로컬 모의(mock) 게이트웨이로 확인했습니다
-(`test/real-pi-headers.test.mjs`). 다만 Pi의 `authHeader: false`
+(`test/real-pi-headers.test.mjs`). 게이트웨이가 다른 형식을 요구하면
+예를 들어 provider의 `headers`에
+`"Authorization": "Token $CORP_LLM_CUSTOM_TOKEN"`을 넣고
+`CORP_LLM_CUSTOM_TOKEN`을 `envAllowlist`와 보안 환경에 추가하세요.
+`authHeader: true`는 Pi가 `Bearer <apiKey>`를 다시 `Authorization`에
+설정하므로, 이처럼 직접 정한 인증 헤더를 쓸 때는 활성화하지 마세요.
+Pi의 `authHeader: false`
 옵션이 SDK가 자동으로 만드는 `Authorization` 헤더를 실제로
 제거하는지는 이 프로젝트에서 검증하지 않았으므로, 그 옵션의 동작을
 문서나 설정으로 단정하지 마세요.
@@ -101,7 +111,16 @@ API 키나 헤더 값을 담은 환경변수를 교체(rotate)한 뒤에는 MCP 
 프로세스를 재시작해야 새 값이 적용됩니다. `models.json` 내용 자체를
 바꾼 경우 기존에 시드된 에이전트 설정과 내용이 달라져 pi-mcp가
 `models.json changed` 오류로 명시적 초기화를 요구할 수 있습니다; 이
-때는 상태 디렉터리의 에이전트 설정을 정리한 뒤 다시 시작하세요.
+때는 모든 작업 worker가 종료됐고 격리 상태가 없는지 확인한 뒤
+비공개 상태 디렉터리를 백업하고 `agent/models.json`만 검토된 파일로
+교체하세요. `agent/auth.json`과 OAuth 자격증명은 보존해야 합니다.
+자세한 절차는 [운영 안내](operations.md)를 따르세요.
+
+명시적으로 설정한 헤더 값은 길이가 한 글자여도 결과, 오류, 로그와
+상태의 자유 형식 텍스트에서 마스킹됩니다. 매우 짧은 값은 일반 텍스트도
+많이 가릴 수 있습니다. 작업 ID와 경로 등 서버가 생성한 제어 필드는
+작업 조회/취소를 위해 유지됩니다. 비공개 Pi 세션과 작업 공간은 여전히
+민감하므로 별도로 보호하세요.
 
 이 기능은 OpenAI 호환 Chat Completions 형식의 게이트웨이를 기준으로
 작성/검증되었습니다. 실제 회사 게이트웨이의 API 형식과 정확한
