@@ -2,8 +2,23 @@
 
 Initial immutable input: `69ba7282c76f48c36cf8c1702698a5febf3113a6`.
 Corrected immutable input: `4744d1fb6eebe5a2c7cfbabf0e8243a426cef801`.
-Assigned checkout: `/Users/leebw/workspace/claude/pi-mcp-worktrees/regression`; final branch `codex/pi-mcp/regression-final`.
-Before either phase's writes, `git -C` confirmed repository root, expected branch, exact HEAD, and clean status. Parent committed the supplemental harness in `6bdbc54` and integrated the reviewed source fix before the corrected handoff. This final phase changed only this report; source and tests were immutable.
+Latest redaction input: `a9dfdec01116a64ef79e05bc9a7c81edb9ad9e28`.
+Assigned checkout: `/Users/leebw/workspace/claude/pi-mcp-worktrees/regression`; latest branch `codex/pi-mcp/regression-redaction`.
+Before each phase's writes, `git -C` confirmed repository root, expected branch, exact HEAD, and clean status. Parent committed the supplemental harness in `6bdbc54` and integrated the reviewed source fix before the corrected handoff. In the final two phases, only this report changed in the regression worktree; source and tests were immutable.
+
+## Narrow redaction retest
+
+The latest input changed the worker credential-reference resolver, fake Pi fixture, a focused lifecycle regression, and documentation. After verifying the clean branch and SHA, I extracted the exact committed archive into the task-owned gram directory while retaining unchanged locked dependencies. In the task-only Docker image with `--network none`, both selected lifecycle tests passed: plain model environment reference redaction and braced/embedded reference redaction in result and status. **2 passed, 0 failed; 4.07 seconds.** The previous full suite result below applies to `4744d1f`; it was not rerun for this narrow change.
+
+```sh
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression rev-parse --show-toplevel
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression branch --show-current
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression rev-parse HEAD
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression status --short --untracked-files=all
+ssh gram 'find /tmp/pi-mcp-20261023/regression -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf -- {} +'
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression archive a9dfdec01116a64ef79e05bc9a7c81edb9ad9e28 | ssh gram 'tar -x -C /tmp/pi-mcp-20261023/regression'
+ssh gram "docker run --rm --network none --name pi-mcp-regression-redaction-1023 -v /tmp/pi-mcp-20261023/regression:/work -w /work pi-mcp-regression-tools:20261023 node --test --test-name-pattern='model env reference|braced and embedded' test/lifecycle.test.mjs"
+```
 
 ## Corrected-input verification
 
