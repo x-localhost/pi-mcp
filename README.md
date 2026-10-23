@@ -1,5 +1,7 @@
 # Pi MCP
 
+[사내 전용 격리 Pi 에이전트 설정](docs/internal-agent.md)은 별도 opt-in Docker 프로필입니다.
+
 Pi MCP delegates bounded coding and review tasks to [Pi coding agent](https://github.com/earendil-works/pi) through seven MCP stdio tools. Each new task starts at a committed Git ref in its own branch and worktree. It returns a job ID immediately; the detached worker continues if the MCP client disconnects. Followups reuse the same worktree and Pi session.
 
 ## Install and configure

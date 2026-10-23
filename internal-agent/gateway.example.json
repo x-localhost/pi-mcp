@@ -1,0 +1,10 @@
+{
+  "upstreamUrl": "https://llm.internal.example/v1/chat/completions",
+  "upstreamAddress": "10.0.0.10",
+  "model": "approved-model",
+  "caFile": "/etc/pi-internal/ca.pem",
+  "headers": {
+    "Authorization": "Bearer $CORP_LLM_API_KEY",
+    "X-Corp-Client": "${CORP_CLIENT_ID}"
+  }
+}

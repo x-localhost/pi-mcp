@@ -1,0 +1,10 @@
+.git
+.git/**
+.env
+*.env
+docs
+test
+scripts
+handoff.md
+README.md
+node_modules

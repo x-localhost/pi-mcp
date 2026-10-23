@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "corporate": {
+      "baseUrl": "http://127.0.0.1:18080/v1",
+      "api": "openai-completions",
+      "apiKey": "pi-internal-placeholder",
+      "models": [{ "id": "approved-model", "name": "Approved model", "contextWindow": 128000, "maxTokens": 8192 }]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "piPath": "/usr/local/bin/node",
+  "piArgs": ["/app/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"],
+  "stateDir": "/var/lib/pi-mcp",
+  "allowedRoots": ["/workspace"],
+  "maxConcurrent": 2,
+  "defaultTimeoutSeconds": 1800,
+  "maxTimeoutSeconds": 7200,
+  "defaultMaxTurns": 30,
+  "provider": "corporate",
+  "model": "approved-model",
+  "modelsFile": "/etc/pi-internal/models.json",
+  "allowedCommands": [],
+  "envAllowlist": []
+}
