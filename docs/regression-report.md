@@ -1,10 +1,33 @@
 # Independent regression — 2026-10-23
 
-Immutable implementation input: `69ba7282c76f48c36cf8c1702698a5febf3113a6`.
-Assigned checkout: `/Users/leebw/workspace/claude/pi-mcp-worktrees/regression`, branch `codex/pi-mcp/regression`.
-Before any write, `git -C` confirmed this root, branch, exact HEAD, and a clean status. Implementation and existing tests were not edited. Supplemental harness files under `test/regression-*` and this report are uncommitted and belong only to this test worktree.
+Initial immutable input: `69ba7282c76f48c36cf8c1702698a5febf3113a6`.
+Corrected immutable input: `4744d1fb6eebe5a2c7cfbabf0e8243a426cef801`.
+Assigned checkout: `/Users/leebw/workspace/claude/pi-mcp-worktrees/regression`; final branch `codex/pi-mcp/regression-final`.
+Before either phase's writes, `git -C` confirmed repository root, expected branch, exact HEAD, and clean status. Parent committed the supplemental harness in `6bdbc54` and integrated the reviewed source fix before the corrected handoff. This final phase changed only this report; source and tests were immutable.
 
-## Results
+## Corrected-input verification
+
+- On gram, the combined `npm test` suite passed **132/132**, 0 failed, in the task-only rg/fd image with `--network none`. This includes released Pi 1.4.0 against local mock gateways, HTTPS CONNECT/custom CA, all seven MCP tools, cross-process submission, and lifecycle/security coverage.
+- The original dangling external and `.git` symlink regressions both passed for `write` and `edit`. The missing-session followup passed, while sibling exclusion also passed. The startup-stall regression ended `timed_out` and observed no live Pi process. The suite also passed new real-Pi `@` path normalization, RPC error cleanup, observed-model, auth-command, and model-only override checks.
+- `npm pack --dry-run --json` succeeded on this exact archive: 35 files, 51,163-byte tarball estimate, source/docs/examples/tests only, with no credentials, private state, sessions, or generated fixtures in the file list. Nothing was published. npm printed a `.gitignore` fallback warning because there is no `.npmignore`; this did not fail the dry run.
+- No provider credential or paid endpoint was used. `node_modules` was retained from the initial locked install because neither `package.json` nor `package-lock.json` changed between inputs.
+
+Final-phase commands:
+
+```sh
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression rev-parse --show-toplevel
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression branch --show-current
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression rev-parse HEAD
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression status --short --untracked-files=all
+ssh gram 'find /tmp/pi-mcp-20261023/regression -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf -- {} +'
+git -C /Users/leebw/workspace/claude/pi-mcp-worktrees/regression archive 4744d1fb6eebe5a2c7cfbabf0e8243a426cef801 | ssh gram 'tar -x -C /tmp/pi-mcp-20261023/regression'
+ssh gram 'docker run --rm --network none --name pi-mcp-regression-final-suite-1023 -v /tmp/pi-mcp-20261023/regression:/work -w /work pi-mcp-regression-tools:20261023 npm test'
+ssh gram 'docker run --rm --network none --name pi-mcp-regression-final-pack-1023 -v /tmp/pi-mcp-20261023/regression:/work -w /work pi-mcp-regression-tools:20261023 npm pack --dry-run --json'
+```
+
+The initial failures and their reproduction commands remain below as historical evidence. They are resolved on the corrected input.
+
+## Initial input findings
 
 - Committed baseline: `npm test` in gram `node:24.22.0-bookworm`, `--network none`: **106 passed, 0 failed**, including released Pi 1.4.0 mock gateway, HTTPS CONNECT/custom CA, all seven MCP tools, lifecycle and policy tests.
 - Independent multi-process tests: **5 passed**. Two separate Node processes simultaneously exercised identical and conflicting `request_id`, global concurrency, and sibling followup exclusion. A separate isolation check confirmed selected commit checkout excludes tracked dirty, untracked, and ignored source files without changing the source checkout.
