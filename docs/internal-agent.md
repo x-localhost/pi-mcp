@@ -35,7 +35,7 @@ docker compose -f internal-agent/compose.yaml -p "$PI_INTERNAL_PROJECT" exec -T 
 
 ## 소스 반입과 결과 확인
 
-호스트 작업 디렉터리는 마운트하지 않습니다. 선택한 **커밋된 로컬 브랜치**만 Git bundle로 표준입력을 통해 새 `/workspace/<name>` 저장소에 반입합니다. Git bundle 작성 시 훅과 fsmonitor를 끕니다. 호스트 `.git/config`, 훅, 미추적 파일, 소켓은 복사되지 않습니다. 반입할 브랜치를 먼저 검토하고 커밋하세요.
+호스트 작업 디렉터리는 마운트하지 않습니다. 선택한 **커밋된 로컬 브랜치**만 최대 64 MiB의 Git bundle로 표준입력을 통해 새 `/workspace/<name>` 저장소에 반입합니다. Git bundle 작성 시 훅과 fsmonitor를 끕니다. 호스트 `.git/config`, 훅, 미추적 파일, 소켓은 복사되지 않습니다. 반입할 브랜치를 먼저 검토하고 커밋하세요.
 
 ```sh
 python3 scripts/import-internal-agent.py \
