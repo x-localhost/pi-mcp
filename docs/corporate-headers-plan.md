@@ -35,6 +35,8 @@ Escalation: GREEN followup also ended at its 45-turn limit, with zero permission
 
 Short-secret design decision from independent Astra: preserve trusted generated task/session/path/status control fields at the MCP public projection; mask free text, errors, progress, title, result/log/patch content at every explicit secret length. Never globally exempt arbitrary nested `id`/`path` keys. Use one-pass longest-match redaction and preserve existing placeholders on repeat sanitization. Regression must prove header values `a`/`1` leave task handles usable for status/cancel while content is masked. Very short header values may heavily redact free text; document that tradeoff.
 
+Completion handoff: integrated draft input `4907ac36d3308d18d88ee3518fecef2906e2d659`; native `/root/headers_completion` (`sol_implementer`, GPT-6 Sol high) owns the planned completion worktree/branch. Parent remote draft run passed **44/44** existing affected tests but review probes above demonstrate missing coverage; new focused RED/GREEN is required. Active native count 1, Claude count 0. Completion runner gets its own `/tmp/pi-mcp-headers-20261023/completion` source mount and read-only shared installed dependencies; no simultaneous writers to the original remote source.
+
 ## Completion criteria
 
 Actual Pi mock gateway proves configured custom headers across requests. Missing or invalid header configuration fails before model traffic, without leaking values. Existing model/auth/proxy regression checks remain green. Exact RED/GREEN commands/results and unresolved assumptions recorded, all scoped changes committed and handoff updated. Actual corporate endpoint authentication is unverified until endpoint contract and deployment secrets are supplied outside this conversation.
