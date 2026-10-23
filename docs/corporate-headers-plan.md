@@ -46,3 +46,9 @@ Final correction handoff: parent reviewed and committed the two bounded fixes as
 ## Completion criteria
 
 Actual Pi mock gateway proves configured custom headers across requests. Missing or invalid header configuration fails before model traffic, without leaking values. Existing model/auth/proxy regression checks remain green. Exact RED/GREEN commands/results and unresolved assumptions recorded, all scoped changes committed and handoff updated. Actual corporate endpoint authentication is unverified until endpoint contract and deployment secrets are supplied outside this conversation.
+
+## Completion evidence
+
+Independent final full suite on immutable `52104b205e8c26fe0e9ca99c57da886209713bec`: **174 passed, 0 failed, 0 skipped**, 15 suites (gram, Node 24.22.0, network disabled, fake loopback gateways). Parent inspected the final log and integrated the tester report as `2b10c3f`. Independent Astra approved the same source commit: both P2 findings closed, no remaining blocker in this scoped review. Source/tests/package manifests remain identical to that tested input. Example JSON files (3) parse successfully and `git diff --check` is clean. Parent reconciled the unit report's design sentence with the final original-text span implementation.
+
+All delegates are complete. Task test containers are gone; parent removed only `/tmp/pi-mcp-headers-20261023` and task image `pi-mcp-headers-tools:20261023`, leaving the shared base image and other jobs untouched. Historical log paths in the reports describe the runs; durable results are recorded here and in [the regression report](corporate-headers-regression.md). Local review worktrees are preserved. No real company endpoint, paid model, global/live MCP configuration, push, deployment or publication was used. Actual company endpoint/headers and earlier OS isolation, Git-hook/textconv and egress concerns remain deployment acceptance items, not claims established by this feature.
