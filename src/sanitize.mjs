@@ -32,8 +32,35 @@ export function sanitize(value, env = process.env, extraSecrets = []) {
   const secretPattern = new RegExp(ordered.map(escapedPattern).join('|'), 'g');
   const clean = item => {
     if (typeof item === 'string') {
-      const knownMasked = item.replace(secretPattern, match => match === '[redacted]' ? match : '[redacted]');
-      return knownMasked.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@').replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]');
+      // Locate every span in the original string. Replacing a one-character
+      // known secret first could break a Bearer token or URL before the
+      // generic matcher sees it, leaving the rest of that credential exposed.
+      const spans = [];
+      for (const match of item.matchAll(secretPattern)) {
+        if (match[0] !== '[redacted]') spans.push([match.index, match.index + match[0].length]);
+      }
+      for (const match of item.matchAll(/\bBearer\s+([^\s"']+)/gi)) {
+        const start = match.index + match[0].length - match[1].length;
+        spans.push([start, start + match[1].length]);
+      }
+      for (const match of item.matchAll(/https?:\/\/([^\s/@]+:[^\s/@]+)@/gi)) {
+        const start = match.index + match[0].indexOf(match[1]);
+        spans.push([start, start + match[1].length]);
+      }
+      if (!spans.length) return item;
+      spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+      const merged = [];
+      for (const span of spans) {
+        const last = merged.at(-1);
+        if (last && span[0] < last[1]) last[1] = Math.max(last[1], span[1]);
+        else merged.push([...span]);
+      }
+      let result = '', cursor = 0;
+      for (const [start, end] of merged) {
+        result += item.slice(cursor, start) + '[redacted]';
+        cursor = end;
+      }
+      return result + item.slice(cursor);
     }
     if (Array.isArray(item)) return item.map(clean);
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, val]) => [key,

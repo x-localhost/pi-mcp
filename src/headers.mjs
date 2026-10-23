@@ -166,6 +166,14 @@ export function allHeaderRefNames(modelsConfig) {
 // compound values. Credential env follows Pi's provider/model scope rules.
 export function collectHeaderSecrets(modelsConfig, authConfig, childEnv = {}) {
   const secrets = new Set();
+  const add = value => {
+    if (!value) return;
+    secrets.add(value);
+    // Fetch Headers strips edge ASCII spaces before transmission. Keep both
+    // the configured value and the value a gateway can echo back.
+    const wireValue = value.replace(/^ +| +$/g, '');
+    if (wireValue) secrets.add(wireValue);
+  };
   const providers = modelsConfig?.providers;
   if (!providers || typeof providers !== 'object') return [];
   for (const [providerId, entry] of Object.entries(providers)) {
@@ -183,9 +191,9 @@ export function collectHeaderSecrets(modelsConfig, authConfig, childEnv = {}) {
           const resolved = resolveReference(part.name, credentialEnv, childEnv);
           if (typeof resolved !== 'string' || !resolved) { complete = false; continue; }
           full += resolved;
-          secrets.add(resolved);
+          add(resolved);
         }
-        if (complete && full) secrets.add(full);
+        if (complete) add(full);
       }
     };
     collect(entry.headers, ownedEnv);

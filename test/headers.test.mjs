@@ -11,7 +11,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Manager } from '../src/manager.mjs';
-import { referencedNames } from '../src/headers.mjs';
+import { referencedNames, collectHeaderSecrets } from '../src/headers.mjs';
 import { sanitize } from '../src/sanitize.mjs';
 
 async function repoSetup(prefix) {
@@ -116,6 +116,24 @@ test('known complete header secrets redact before generic Bearer masking', () =>
   assert.equal(sanitize('Bearer abc def', {}, ['abc def']), 'Bearer [redacted]');
   assert.equal(sanitize('Bearer abc\\"def', {}, ['abc"def']), 'Bearer [redacted]');
   assert.equal(sanitize('Bearer [redacted]suffix', {}, ['[redacted]suffix']), 'Bearer [redacted]');
+});
+
+test('short known secrets cannot split generic Bearer tokens or URL userinfo', () => {
+  assert.equal(sanitize('Bearer unrelated-token', {}, ['a']), 'Be[redacted]rer [redacted]');
+  assert.equal(sanitize('Bearer unrelated-token', {}, ['1']), 'Bearer [redacted]');
+  assert.equal(sanitize('https://user:password@example.invalid', {}, [':']), 'https[redacted]//[redacted]@example.invalid');
+});
+
+test('header secret collection covers Fetch Headers edge-space normalization', () => {
+  const modelsConfig = { providers: { corp: { headers: { 'X-Cred': '  private-value  ', 'X-Env': '$CRED' } } } };
+  const secrets = collectHeaderSecrets(modelsConfig, {}, { CRED: '  from-env  ' });
+  const wireLiteral = new Headers({ 'X-Cred': '  private-value  ' }).get('X-Cred');
+  const wireEnv = new Headers({ 'X-Env': '  from-env  ' }).get('X-Env');
+  assert.equal(wireLiteral, 'private-value');
+  assert.equal(wireEnv, 'from-env');
+  assert.equal(sanitize(`${wireLiteral} ${wireEnv}`, {}, secrets), '[redacted] [redacted]');
+  assert.ok(secrets.includes('  private-value  '));
+  assert.ok(secrets.includes('  from-env  '));
 });
 
 test('malformed source JSON fails generically before job or worktree creation', async () => {
@@ -321,4 +339,26 @@ test('a short (3-character) header-sourced secret is redacted from public and pr
   assert.equal(JSON.stringify(result).includes(secret), false);
   const privateResult = await fs.readFile(path.join(manager.jobDir(started.id), 'result.txt'), 'utf8');
   assert.equal(privateResult.includes(secret), false);
+});
+
+test('worker masks a gateway-style echo of a space-trimmed literal header', { timeout: 20000 }, async () => {
+  const fake = fileURLToPath(new URL('./fixtures/fake-pi.mjs', import.meta.url));
+  await fs.chmod(fake, 0o755);
+  const { tmp, repository } = await repoSetup('pi-headers-trimmed-echo-');
+  const secret = 'trimmed-echo-value';
+  const manager = await makeManager(tmp, { mock: { headers: { 'X-Cred': `  ${secret}  ` } } },
+    { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', FAKE_PI_SCENARIO: 'secret_error', CORP_SESSION: secret });
+  manager.config.piPath = fake; manager.spawnWorker = true;
+  const started = await manager.start({ ...baseInput, repository, provider: 'mock', model: 'mock' });
+  let status;
+  for (let i = 0; i < 150; i++) {
+    status = await manager.status(started.id);
+    if (!['starting', 'running'].includes(status.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(status.status, 'failed');
+  assert.equal(JSON.stringify(status).includes(secret), false);
+  const result = await manager.result(started.id);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal((await fs.readFile(path.join(manager.jobDir(started.id), 'result.txt'), 'utf8')).includes(secret), false);
 });
