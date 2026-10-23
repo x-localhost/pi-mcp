@@ -23,7 +23,7 @@ async function setup(scenario = 'success') {
   return { manager, input };
 }
 async function finished(manager, id) {
-  for (let i = 0; i < 150; i++) { const status = await manager.status(id); if (!['starting', 'running'].includes(status.status)) return status; await delay(100); }
+  for (let i = 0; i < 150; i++) { const status = await manager.status(id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) return status; await delay(100); }
   throw new Error('Job did not finish');
 }
 

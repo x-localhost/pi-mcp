@@ -64,7 +64,7 @@ test('released Pi executes grep and find with real rg/fd and returns tool result
     let status;
     for (let i = 0; i < 150; i++) {
       status = await manager.status(start.id);
-      if (!['starting', 'running'].includes(status.status)) break;
+      if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break;
       await pause(100);
     }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(start.id)));

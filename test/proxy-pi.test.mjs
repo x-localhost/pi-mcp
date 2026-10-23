@@ -56,20 +56,23 @@ test('released Pi uses CONNECT proxy and configured CA for HTTPS model requests'
       maxConcurrent: 1, defaultTimeoutSeconds: 12, maxTimeoutSeconds: 30, defaultMaxTurns: 2, envAllowlist: ['MOCK_API_KEY'],
       network: { httpsProxyEnv: 'CORP_PROXY', caFile } };
     const config = validateConfig({ ...raw, stateDir: path.join(tmp, 'state-good') }, tmp);
+    // This direct Manager fixture has no persisted config file for a dispatcher.
+    delete config.queue;
     const manager = await new Manager(config, buildChildEnv(config, source)).init();
     assert.equal((await manager.health()).version, '1.4.0');
     assert.equal(connects, 0);
     const started = await manager.start({ repository, title: 'Proxy', prompt: 'Say hello.' });
     let status;
-    for (let i = 0; i < 150; i++) { status = await manager.status(started.id); if (!['starting', 'running'].includes(status.status)) break; await delay(100); }
+    for (let i = 0; i < 150; i++) { status = await manager.status(started.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await delay(100); }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(started.id)));
     assert.match((await manager.result(started.id)).result, /TLS proxy completed/);
     assert.ok(connects >= 1); assert.ok(requests >= 1);
     const successfulRequests = requests;
     const withoutCa = validateConfig({ ...raw, stateDir: path.join(tmp, 'state-bad'), network: { httpsProxyEnv: 'CORP_PROXY' } }, tmp);
+    delete withoutCa.queue;
     const failed = await new Manager(withoutCa, buildChildEnv(withoutCa, source)).init();
     const negative = await failed.start({ repository, title: 'No CA', prompt: 'Say hello.' });
-    for (let i = 0; i < 150; i++) { status = await failed.status(negative.id); if (!['starting', 'running'].includes(status.status)) break; await delay(100); }
+    for (let i = 0; i < 150; i++) { status = await failed.status(negative.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await delay(100); }
     assert.ok(['failed', 'turn_limit', 'timed_out'].includes(status.status), JSON.stringify(await failed.result(negative.id)));
     assert.ok((await failed.result(negative.id)).result.length > 0);
     assert.ok(connects >= 2);

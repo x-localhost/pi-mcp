@@ -30,8 +30,8 @@ test('oversized RPC line rejects a pending request without waiting for its deadl
   const input = new PassThrough(); const output = new PassThrough();
   const rpc = new RpcClient(input, output);
   const pending = rpc.request('get_state', {}, 10000);
-  input.write('x'.repeat(1024 * 1024 + 1));
-  await assert.rejects(pending, /RPC line exceeds 1 MiB/);
+  input.write('x'.repeat(4 * 1024 * 1024 + 1));
+  await assert.rejects(pending, /RPC frame exceeds 4 MiB/);
   rpc.close();
 });
 
@@ -50,7 +50,7 @@ test('Pi that never acknowledges policy readiness times out and leaves no live p
   let status;
   for (let i = 0; i < 180; i++) {
     status = await manager.status(start.id);
-    if (!['starting', 'running'].includes(status.status)) break;
+    if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break;
     await pause(100);
   }
   assert.equal(status.status, 'timed_out', JSON.stringify(await manager.result(start.id)));

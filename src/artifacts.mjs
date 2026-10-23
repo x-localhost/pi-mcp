@@ -83,6 +83,25 @@ function textBytes(bytes) {
   const decoded = bytes.toString('utf8');
   return Buffer.from(decoded, 'utf8').equals(bytes) ? decoded : null;
 }
+function sanitizeReportJson(decoded, sanitize, env) {
+  let parsed;
+  try { parsed = JSON.parse(decoded); } catch { return sanitize(decoded, env); }
+  const statuses = new Set(['queued', 'starting', 'running', 'finalizing', 'completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'quarantined', 'passed', 'pending', 'not_requested', 'skipped', 'unverified', 'mutated_or_incomplete', 'received', 'unknown']);
+  const stopReasons = new Set(['stop', 'end_turn', 'error', 'aborted', 'other']);
+  const reasons = new Set(['result_size_limit', 'public_output_limit', 'report_size_limit']);
+  const visit = (value, key = '') => {
+    if (typeof value === 'string') {
+      if (key === 'status' && statuses.has(value) || key === 'stopReason' && stopReasons.has(value) || key === 'omittedReason' && reasons.has(value) || key === 'outputOmitted' && reasons.has(value)
+        || ['beforeDigest', 'afterDigest', 'verifiedSnapshotDigest', 'inputSnapshotDigest', 'manifestSha256', 'sha256'].includes(key) && hex.test(value)
+        || key === 'id' && /^[a-z][a-z0-9_-]{0,47}$/.test(value) || key === 'signal' && /^SIG[A-Z0-9]+$/.test(value)) return value;
+      return sanitize(value, env);
+    }
+    if (Array.isArray(value)) return value.map(item => visit(item));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([childKey, item]) => [childKey, visit(item, childKey)]));
+    return value;
+  };
+  return JSON.stringify(visit(parsed));
+}
 function validateBaseline(materialBaseline) {
   if (!Array.isArray(materialBaseline) || materialBaseline.length > 4096) throw new Error('Invalid material baseline');
   const paths = new Set();
@@ -204,7 +223,7 @@ export async function snapshotArtifacts({ jobDir, worktree, baseCommit, config =
     catch { omit({ path: `reports/${report.name}`, reason: 'report_mutated' }); exportComplete = false; continue; }
     const decoded = textBytes(bytes);
     if (decoded === null) { omit({ path: `reports/${report.name}`, reason: 'binary_report' }); exportComplete = false; continue; }
-    const cleaned = sanitize(decoded, env);
+    const cleaned = ['result', 'verification'].includes(report.name) ? sanitizeReportJson(decoded, sanitize, env) : sanitize(decoded, env);
     const publicBytes = Buffer.from(cleaned);
     if (publicBytes.length > bounds.maxFileBytes || publicTotal + publicBytes.length > bounds.maxTotalBytes) {
       omit({ path: `reports/${report.name}`, reason: 'public_output_limit' }); exportComplete = false; continue;
@@ -255,6 +274,48 @@ async function manifestAt(jobDir) {
     if (['utf8', 'base64'].includes(item.encoding) && !hex.test(item.sha256)) throw new Error('Invalid artifact digest');
     ids.add(item.id);
   }
+  return manifest;
+}
+export async function attachArtifactReport({ jobDir, name, file, config = {}, sanitize = defaultSanitize, env = process.env }) {
+  const reportFiles = { result: 'result.json', verification: 'verification.json', stdout: 'stdout.log', stderr: 'stderr.log' };
+  if (reportFiles[name] !== file || !path.isAbsolute(jobDir) || await fs.realpath(jobDir) !== jobDir) throw new Error('Invalid artifact report attachment');
+  const bounds = validateArtifactConfig(config);
+  const manifest = await manifestAt(jobDir);
+  if (manifest.entries.some(item => item.path === `reports/${name}`)) throw new Error('Artifact report already attached');
+  const markOmitted = reason => {
+    manifest.omittedCount++;
+    if (manifest.omissions.length < 4096) manifest.omissions.push({ path: `reports/${name}`, reason });
+    manifest.omissionsTruncated = manifest.omittedCount > manifest.omissions.length;
+    manifest.exportComplete = manifest.complete = manifest.applicable = false;
+    manifest.truncated = true;
+  };
+  const publicTotal = manifest.entries.reduce((sum, item) => sum + (item.encoding === 'utf8' || item.encoding === 'base64' ? item.size : 0), 0);
+  let bytes = null;
+  try { await safeLstat(jobDir, file); bytes = (await readRegular(path.join(jobDir, file), bounds.maxFileBytes)).bytes; }
+  catch { markOmitted('report_unavailable_or_unsafe'); }
+  if (bytes && manifest.entries.length >= bounds.maxFiles) { markOmitted('report_count_limit'); bytes = null; }
+  if (bytes && textBytes(bytes) === null) { markOmitted('binary_report'); bytes = null; }
+  let publicBytes;
+  if (bytes) {
+    const cleaned = ['result', 'verification'].includes(name) ? sanitizeReportJson(bytes.toString('utf8'), sanitize, env) : sanitize(bytes.toString('utf8'), env);
+    if (typeof cleaned !== 'string') throw new Error('sanitize must return text');
+    publicBytes = Buffer.from(cleaned);
+    if (publicBytes.length > bounds.maxFileBytes || publicTotal + publicBytes.length > bounds.maxTotalBytes) { markOmitted('public_output_limit'); bytes = null; }
+    else {
+      const highest = manifest.entries.reduce((max, item) => Math.max(max, Number(item.id.slice(1))), 0);
+      if (highest >= 999999) { markOmitted('report_count_limit'); bytes = null; }
+      else {
+        const id = `a${String(highest + 1).padStart(6, '0')}`;
+        await fs.writeFile(path.join(jobDir, 'artifacts', 'public', id), publicBytes, { flag: 'wx', mode: 0o600 });
+        const redacted = !publicBytes.equals(bytes);
+        manifest.entries.push({ id, path: `reports/${name}`, type: 'report', size: publicBytes.length, sha256: sha(publicBytes), encoding: 'utf8', redacted, complete: !redacted, applicable: false });
+        if (redacted) { manifest.exportComplete = manifest.complete = manifest.applicable = false; }
+      }
+    }
+  }
+  const copy = { ...manifest }; delete copy.manifestSha256;
+  manifest.manifestSha256 = sha(JSON.stringify(copy));
+  await atomicJson(path.join(jobDir, 'artifacts', 'manifest.json'), manifest);
   return manifest;
 }
 export async function exportArtifactBundle(jobDir) {

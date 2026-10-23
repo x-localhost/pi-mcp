@@ -47,7 +47,7 @@ test('released Pi 1.4.0 runs with explicit policy and local mock gateway', { tim
       { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', MOCK_API_KEY: 'test-only-key' }).init();
     const start = await manager.start({ repository, title: 'Real Pi mock', prompt: 'Respond briefly.', provider: 'mock', model: 'mock' });
     let status;
-    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['starting', 'running'].includes(status.status)) break; await pause(100); }
+    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await pause(100); }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(start.id)));
     assert.equal(requests, 2);
     assert.match((await manager.result(start.id)).result, /Mock gateway completed/);

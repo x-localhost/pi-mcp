@@ -1,5 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 import { EventEmitter } from 'node:events';
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 
 export class RpcClient extends EventEmitter {
   constructor(input, output) {
@@ -11,11 +12,11 @@ export class RpcClient extends EventEmitter {
   }
   feed(text) {
     this.buffer += text;
-    if (this.buffer.length > 1024 * 1024) { this.fail(new Error('RPC line exceeds 1 MiB')); this.input.destroy(); return; }
     let newline;
     while ((newline = this.buffer.indexOf('\n')) !== -1) {
       const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1);
       if (!line) continue;
+      if (Buffer.byteLength(line) > MAX_FRAME_BYTES) { this.fail(new Error('RPC frame exceeds 4 MiB')); this.input.destroy(); return; }
       let event; try { event = JSON.parse(line); } catch { this.emit('malformed', line); continue; }
       if (!event || typeof event !== 'object' || Array.isArray(event) || typeof event.type !== 'string') { this.emit('malformed', line); continue; }
       if (event.type === 'response' && this.pending.has(event.id)) {
@@ -25,13 +26,16 @@ export class RpcClient extends EventEmitter {
       }
       this.emit('event', event); this.emit(event.type === 'error' ? 'rpc_error' : event.type, event);
     }
+    if (Buffer.byteLength(this.buffer) > MAX_FRAME_BYTES) { this.fail(new Error('RPC frame exceeds 4 MiB')); this.input.destroy(); }
   }
   request(type, fields = {}, timeoutMs = 15000) {
     const id = `rpc-${++this.nextId}`;
+    const frame = JSON.stringify({ id, type, ...fields }) + '\n';
+    if (Buffer.byteLength(frame) > MAX_FRAME_BYTES) return Promise.reject(new Error('RPC outbound frame exceeds 4 MiB'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`RPC ${type} timed out`)); }, timeoutMs);
       this.pending.set(id, { resolve, reject, command: type, timer });
-      this.output.write(JSON.stringify({ id, type, ...fields }) + '\n', error => {
+      this.output.write(frame, error => {
         if (error) { this.pending.delete(id); clearTimeout(timer); reject(error); }
       });
     });

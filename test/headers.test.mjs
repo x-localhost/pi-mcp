@@ -330,7 +330,7 @@ test('a short (3-character) header-sourced secret is redacted from public and pr
   let status;
   for (let i = 0; i < 150; i++) {
     status = await manager.status(started.id);
-    if (!['starting', 'running'].includes(status.status)) break;
+    if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.equal(status.status, 'failed');
@@ -353,7 +353,7 @@ test('worker masks a gateway-style echo of a space-trimmed literal header', { ti
   let status;
   for (let i = 0; i < 150; i++) {
     status = await manager.status(started.id);
-    if (!['starting', 'running'].includes(status.status)) break;
+    if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.equal(status.status, 'failed');

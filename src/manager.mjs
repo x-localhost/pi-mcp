@@ -6,11 +6,18 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sanitize } from './sanitize.mjs';
 import { validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
+import { withOwnershipLock } from './ownership.mjs';
+import { appendJobEvent, readJobEvents } from './events.mjs';
+import { applyOfflineMaterials } from './offline-materials.mjs';
+import { identityState, groupState, stopOwnedGroup } from './ownership.mjs';
+import { scanState } from './storage.mjs';
+import { normalizeImages } from './images.mjs';
+import { listArtifacts, readArtifact, restoreCheckpoint } from './artifacts.mjs';
 
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const active = new Set(['starting', 'running', 'quarantined']);
-const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted']);
+const active = new Set(['starting', 'running', 'finalizing', 'quarantined']);
+const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable']);
 const idPattern = /^task-[0-9a-f-]{36}$/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
@@ -58,19 +65,118 @@ export class Manager {
   jobDir(id) { assertId(id); return path.join(this.jobsDir, id); }
   async read(id) { return JSON.parse(await fs.readFile(path.join(this.jobDir(id), 'job.json'), 'utf8')); }
   async lock(run) {
-    const lock = path.join(this.config.stateDir, 'submit.lock'); let held = false;
-    for (let attempt = 0; attempt < 100; attempt++) {
-      try { await fs.mkdir(lock, { mode: 0o700 }); held = true; await fs.writeFile(path.join(lock, 'pid'), String(process.pid), { mode: 0o600 }); break; }
-      catch (error) {
-        if (error.code !== 'EEXIST') throw error;
-        const owner = Number(await fs.readFile(path.join(lock, 'pid'), 'utf8').catch(() => '0'));
-        const stat = await fs.stat(lock).catch(() => null);
-        if (stat && Date.now() - stat.mtimeMs > 5000 && (!owner || !alive(owner))) await fs.rm(lock, { recursive: true, force: true }).catch(() => {});
-        await sleep(100);
-      }
+    return withOwnershipLock(path.join(this.config.stateDir, 'submit.lock'), run);
+  }
+  async appendEvent(id, event) {
+    const secrets = await this.headerSecretValues();
+    const safe = Object.fromEntries(Object.entries(event).map(([key, value]) => [key,
+      key === 'type' && ['progress', 'status', 'turn_start', 'message_end', 'steer'].includes(value)
+        || key === 'status' && ['queued', 'starting', 'running', 'finalizing', 'completed', 'failed', 'cancelled', 'received', 'queued_by_pi', 'handled_by_pi', 'unknown'].includes(value)
+        || key === 'controlId' && /^[0-9a-f-]{36}$/.test(value) ? value : sanitize(value, this.childEnv, secrets)]));
+    return appendJobEvent(this.jobDir(id), safe);
+  }
+  async events(id, options = {}) { return this.lock(() => readJobEvents(this.jobDir(id), options)); }
+  async ensureDispatcher() {
+    if (!this.spawnWorker || !this.config.queue) return;
+    const configFile = this.config.configFile || process.env.PI_MCP_CONFIG;
+    if (!configFile) throw new Error('Queued dispatcher requires a configuration file');
+    const dispatcherEnv = { ...this.childEnv, PI_MCP_CONFIG: configFile };
+    // The dispatcher loads configuration again. Preserve only the already
+    // validated values needed to resolve named proxy selectors on that pass.
+    for (const [field, target] of [['httpProxyEnv', 'HTTP_PROXY'], ['httpsProxyEnv', 'HTTPS_PROXY'], ['allProxyEnv', 'ALL_PROXY'], ['noProxyEnv', 'NO_PROXY']]) {
+      const sourceName = this.config.network?.[field];
+      if (sourceName && this.childEnv[target] !== undefined) dispatcherEnv[sourceName] = this.childEnv[target];
     }
-    if (!held) throw new Error('Submission lock busy');
-    try { return await run(); } finally { await fs.rm(lock, { recursive: true, force: true }); }
+    const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'dispatcher.mjs'), configFile], { cwd: codeRoot, detached: true, stdio: 'ignore', env: dispatcherEnv });
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    child.unref();
+  }
+  frozenPolicy(job) {
+    const materialIds = job.materials || [];
+    const materials = materialIds.map(id => this.config.offlineMaterials?.materials?.find(item => item.id === id));
+    const verifierIds = job.verificationIds || [];
+    const verification = verifierIds.map(id => this.config.verification?.commands?.find(item => item.id === id));
+    return { allowedCommands: this.config.allowedCommands || [], approvedMcp: this.config.approvedMcp || { servers: [] }, materials, verification,
+      artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, mode: job.mode, provider: job.provider, model: job.model,
+      allowedRoots: this.config.allowedRoots, piPath: this.config.piPath, piArgs: this.config.piArgs || [], envAllowlist: this.config.envAllowlist || [],
+      network: this.config.network || {}, agentDir: this.config.agentDir || null, modelsFile: this.config.modelsFile || null, authFile: this.config.authFile || null };
+  }
+  async launchWorker(job) {
+    const dir = this.jobDir(job.id);
+    await this.seedAgent();
+    await atomicJson(path.join(dir, 'runtime.json'), { piPath: this.config.piPath, piArgs: this.config.piArgs || [],
+      agentDir: this.agentDir, allowedCommands: this.config.allowedCommands || [], policyExtension: path.join(codeRoot, 'src', 'policy-extension.mjs'),
+      ownedModelsRequired: !!await fs.stat(path.join(this.agentDir, 'models.json')).then(() => true, () => false),
+      ownedAuthRequired: !!await fs.stat(path.join(this.agentDir, 'auth.json')).then(() => true, () => false),
+      configFile: this.config.configFile || process.env.PI_MCP_CONFIG || null,
+      verification: this.config.verification || { commands: [] }, artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, approvedMcp: this.config.approvedMcp || { servers: [] } });
+    if (this.spawnWorker) {
+      const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'worker.mjs'), dir], {
+        cwd: codeRoot, detached: true, stdio: 'ignore', env: { ...this.childEnv, PI_CODING_AGENT_DIR: this.agentDir }
+      });
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      child.unref(); await fs.writeFile(path.join(dir, 'worker.pid'), String(child.pid), { mode: 0o600 });
+    }
+  }
+  async dispatchOnce() {
+    return this.lock(async () => {
+      const jobs = await this.all(); const queued = jobs.filter(item => item.status === 'queued').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0));
+      let changed = false;
+      for (const job of queued) if (Date.now() >= Date.parse(job.queueExpiresAt)) {
+        job.status = 'queue_expired'; job.finishedAt = now(); job.error = 'Queue wait expired before admission';
+        await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job); changed = true;
+      }
+      let capacity = this.config.maxConcurrent - jobs.filter(item => active.has(item.status)).length;
+      for (const job of queued.filter(item => item.status === 'queued')) {
+        if (capacity <= 0) break;
+        if (jobs.some(item => active.has(item.status) && item.worktree === job.worktree)) break;
+        if (sha(stable(this.frozenPolicy(job))) !== job.policyDigest) {
+          job.status = 'failed'; job.error = 'Queued administrator policy changed before admission'; job.finishedAt = now();
+          await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job); changed = true; continue;
+        }
+        try {
+          if (await this.sourceConfigDigest() !== job.sourceConfigDigest) throw new Error('Queued model configuration changed before admission');
+          if (await this.repository(job.repository) !== job.repository) throw new Error('Queued repository no longer allowed');
+          await this.validateHeaders(job.provider, job.model);
+          if (this.config.retention) {
+            const usage = await scanState(this.config.stateDir, this.config.retention);
+            if (!usage.withinLimit) throw new Error('State soft storage admission limit reached');
+          }
+          if (!job.parentJobId) await git(job.repository, ['worktree', 'add', '-b', job.branch, job.worktree, job.baseCommit], false, this.childEnv);
+          await fs.mkdir(job.sessionDir, { recursive: true, mode: 0o700 });
+          if (job.parentJobId) {
+            const parent = await this.read(job.parentJobId);
+            job.materialBaseline = parent.materialBaseline || []; job.inputMaterialsDigest = parent.inputMaterialsDigest || null; job.materialsIdentity = parent.materialsIdentity || [];
+            job.inputSnapshotDigest = parent.artifacts?.inputSnapshotDigest || null;
+          } else if (job.materials?.length) {
+            const applied = await applyOfflineMaterials({ worktree: job.worktree, baseCommit: job.baseCommit, selections: job.materials, config: this.config.offlineMaterials, env: this.childEnv });
+            job.materialBaseline = applied.materialBaseline; job.inputMaterialsDigest = applied.inputMaterialsDigest; job.materialsIdentity = applied.materials;
+          }
+          if (job.forkJobId) {
+            const sourceDir = this.jobDir(job.forkJobId);
+            const restored = await restoreCheckpoint({ jobDir: sourceDir, worktree: job.worktree, env: this.childEnv });
+            job.inputSnapshotDigest = restored.inputSnapshotDigest;
+            const source = await this.read(job.forkJobId);
+            if (!source.sessionCheckpoint?.complete) throw new Error('Source session checkpoint incomplete');
+            const sourceFile = path.join(sourceDir, 'private-session', 'session.jsonl');
+            const handle = await fs.open(sourceFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+            let bytes;
+            try { const stat = await handle.stat(); if (!stat.isFile() || stat.nlink !== 1 || stat.size !== source.sessionCheckpoint.size || stat.size > 16 * 1024 * 1024) throw new Error('Source session checkpoint changed');
+              bytes = Buffer.alloc(stat.size); let offset = 0; while (offset < bytes.length) { const read = await handle.read(bytes, offset, bytes.length - offset, offset); if (!read.bytesRead) throw new Error('Source session changed'); offset += read.bytesRead; }
+            } finally { await handle.close(); }
+            if (sha(bytes) !== source.sessionCheckpoint.sha256) throw new Error('Source session checkpoint digest mismatch');
+            const forkDir = path.join(this.jobDir(job.id), 'fork-input'); await fs.mkdir(forkDir, { mode: 0o700 });
+            job.forkSessionFile = path.join(forkDir, 'session.jsonl'); await fs.writeFile(job.forkSessionFile, bytes, { flag: 'wx', mode: 0o600 });
+          }
+          job.status = 'starting'; job.admittedAt = now(); await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job);
+          await this.launchWorker(job); capacity--; changed = true;
+        } catch (error) {
+          job.status = 'failed'; job.error = sanitize(error.message, this.childEnv); job.finishedAt = now();
+          await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job); changed = true;
+        }
+      }
+      return { pending: queued.filter(item => item.status === 'queued').length, changed };
+    });
   }
   async repository(input) {
     if (typeof input !== 'string' || !path.isAbsolute(input)) throw new Error('repository must be absolute');
@@ -81,32 +187,39 @@ export class Manager {
     return repo;
   }
   async recover(job) {
-    // A worker may have saved a final snapshot after this caller read a running one.
     const latest = await this.read(job.id);
     if (terminal.has(latest.status) || latest.status === 'quarantined') return latest;
-    // A persisted numeric PID alone does not prove process identity after worker death.
-    // Retain the concurrency slot until an operator verifies the orphaned process group.
-    const ended = { ...latest, status: 'quarantined', error: 'Worker stopped; process-group cleanup cannot be verified safely', finishedAt: now() };
+    const ended = { ...latest, status: 'quarantined', error: 'Worker identity or group needs explicit recovery', finishedAt: now() };
     await atomicJson(path.join(this.jobDir(job.id), 'job.json'), ended); return ended;
   }
   async all() {
     const ids = (await fs.readdir(this.jobsDir)).filter(id => idPattern.test(id));
     const jobs = await Promise.all(ids.map(async id => {
       const job = await this.read(id);
-      const marker = Number(await fs.readFile(path.join(this.jobDir(id), 'worker.pid'), 'utf8').catch(() => '0'));
-      const pid = job.workerPid || marker;
-      if (['starting', 'running'].includes(job.status) && pid && !alive(pid)) return this.recover(job);
-      if (job.status === 'starting' && !pid && Date.now() - Date.parse(job.createdAt) > 15000) return this.recover(job);
+      if (['starting', 'running', 'finalizing'].includes(job.status) && job.workerIdentity && await identityState(job.workerIdentity).catch(() => 'unknown') !== 'same') return this.recover(job);
+      if (job.status === 'starting' && !job.workerIdentity && Date.now() - Date.parse(job.admittedAt || job.createdAt) > 15000) return this.recover(job);
       return job;
     }));
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async public(job) {
-    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'createdAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'diffStat', 'changedFiles'];
-    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'createdAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage']);
+    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
+    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest']);
     const secrets = await this.headerSecretValues();
+    const clean = value => sanitize(value, this.childEnv, secrets);
+    const structured = (key, value) => {
+      const copy = structuredClone(value);
+      if (!copy || typeof copy !== 'object') return copy;
+      if (key === 'verification') {
+        if (typeof copy.reason === 'string') copy.reason = clean(copy.reason);
+        for (const command of copy.commands || []) for (const field of ['stdout', 'stderr']) if (typeof command[field] === 'string') command[field] = clean(command[field]);
+      } else if (key === 'artifacts' || key === 'sessionCheckpoint' || key === 'budget') {
+        for (const field of ['error', 'reason']) if (typeof copy[field] === 'string') copy[field] = clean(copy[field]);
+      } else if (key === 'execution' && typeof copy.stopReason === 'string' && !['stop', 'end_turn', 'error', 'aborted'].includes(copy.stopReason)) copy.stopReason = clean(copy.stopReason);
+      return copy;
+    };
     return Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key,
-      trusted.has(key) ? job[key] : sanitize(job[key], this.childEnv, secrets)]));
+      trusted.has(key) ? job[key] : ['execution', 'verification', 'artifacts', 'sessionCheckpoint', 'budget'].includes(key) ? structured(key, job[key]) : clean(job[key])]));
   }
   agentSourcePath(name, explicit) {
     return explicit || (this.config.agentDir ? path.join(this.config.agentDir, name) : null);
@@ -142,11 +255,17 @@ export class Manager {
     if (authConfig) rejectCommands(authConfig);
     validateProviderHeaders({ modelsConfig, authConfig, provider, model, childEnv: this.childEnv });
   }
+  async sourceConfigDigest() {
+    // Model selection must stay frozen in the queue. Owned auth is allowed to
+    // rotate (including Pi OAuth refresh) and is revalidated at admission.
+    const models = await this.loadAgentJson('models.json', this.config.modelsFile);
+    return sha(stable({ models }));
+  }
   async headerSecretValues() {
     const modelsConfig = await this.loadAgentJson('models.json', this.config.modelsFile).catch(() => null);
-    if (!modelsConfig) return [];
     const authConfig = await this.loadAgentJson('auth.json', this.config.authFile).catch(() => null);
-    return collectHeaderSecrets(modelsConfig, authConfig, this.childEnv);
+    return [...collectHeaderSecrets(modelsConfig, authConfig, this.childEnv),
+      ...(this.config.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value))];
   }
   async seedAgent() {
     for (const [explicit, name] of [[this.config.modelsFile, 'models.json'], [this.config.authFile, 'auth.json']]) {
@@ -162,44 +281,55 @@ export class Manager {
       await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL); await fs.chmod(target, 0o600);
     }
   }
-  async start(input, parentId) {
+  async start(input, parentId, { forkFromId } = {}) {
     return this.lock(async () => {
       const jobs = await this.all(); const parent = parentId ? jobs.find(job => job.id === parentId) : null;
+      const forkSource = forkFromId ? jobs.find(job => job.id === forkFromId) : null;
       if (parentId && !parent) throw new Error('Job not found');
+      if (forkFromId && !forkSource) throw new Error('Source job not found');
       if (parent && !terminal.has(parent.status)) throw new Error('Parent job is not terminal');
-      const repository = await this.repository(parent?.repository || input.repository);
-      required(input.prompt, 'prompt', 100000); if (!parent) required(input.title, 'title', 150);
+      if (forkSource && !terminal.has(forkSource.status)) throw new Error('Fork source must be terminal');
+      if (forkSource && (!forkSource.sessionCheckpoint?.complete || !forkSource.artifacts?.checkpointComplete)) throw new Error('Fork source checkpoint incomplete');
+      const repository = await this.repository(parent?.repository || forkSource?.repository || input.repository);
+      required(input.prompt, 'prompt', 100000); if (!parent && !forkSource) required(input.title, 'title', 150);
       if (input.request_id !== undefined) required(input.request_id, 'request_id', 100);
-      const mode = parent?.mode || input.mode || 'implement';
-      if (!['implement', 'review'].includes(mode) || (parent && input.mode && input.mode !== mode)) throw new Error('Invalid mode');
-      if (!parent && input.provider && !input.model) throw new Error('provider override requires model');
-      const provider = parent?.provider || input.provider || this.config.provider;
-      const model = parent?.model || input.model || this.config.model;
+      const mode = parent?.mode || forkSource?.mode || input.mode || 'implement';
+      if (!['implement', 'review'].includes(mode) || ((parent || forkSource) && input.mode && input.mode !== mode)) throw new Error('Invalid mode');
+      if (!parent && !forkSource && input.provider && !input.model) throw new Error('provider override requires model');
+      const provider = parent?.provider || forkSource?.provider || input.provider || this.config.provider;
+      const model = parent?.model || forkSource?.model || input.model || this.config.model;
       if (!provider || !model) throw new Error('provider and model must be configured or supplied');
-      const requestHash = sha(stable({ ...input, repository, parentId: parentId || null }));
+      const requestHash = sha(stable({ ...input, repository, parentId: parentId || null, forkFromId: forkFromId || null }));
       if (input.request_id) {
         const existing = jobs.find(job => job.requestId === input.request_id);
         if (existing) {
           if (existing.requestHash !== requestHash) throw new Error('request_id already used with different inputs');
           return await this.public(existing);
         }
+        const tombstone = await fs.readFile(path.join(this.config.stateDir, 'request-ids', sha(input.request_id) + '.json'), 'utf8').then(JSON.parse, error => error.code === 'ENOENT' ? null : Promise.reject(error));
+        if (tombstone) throw new Error('request_id belongs to a prior cleaned or unavailable job');
       }
       // Preflight before any fresh job/worktree allocation, and on every submission
       // (including followups) so an environment change cannot bypass this check.
       await this.validateHeaders(provider, model);
-      if (jobs.filter(job => active.has(job.status)).length >= this.config.maxConcurrent) throw new Error('Concurrency limit reached');
-      if (parent && jobs.some(job => active.has(job.status) && job.worktree === parent.worktree)) throw new Error('Worktree already active');
+      if (this.config.retention) {
+        const usage = await scanState(this.config.stateDir, this.config.retention);
+        if (!usage.withinLimit) throw new Error('State soft storage admission limit reached');
+      }
+      if (!this.config.queue && jobs.filter(job => active.has(job.status)).length >= this.config.maxConcurrent) throw new Error('Concurrency limit reached');
+      if (this.config.queue && jobs.filter(job => job.status === 'queued').length >= this.config.queue.maxPending) throw new Error('Queue full');
+      if (parent && jobs.some(job => (active.has(job.status) || job.status === 'queued') && job.worktree === parent.worktree)) throw new Error('Worktree already active');
       const timeoutSeconds = input.timeout_seconds ?? this.config.defaultTimeoutSeconds;
       const maxTurns = input.max_turns ?? this.config.defaultMaxTurns;
       if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > this.config.maxTimeoutSeconds) throw new Error('Invalid timeout_seconds');
       if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100) throw new Error('Invalid max_turns');
       const ref = input.base_ref || 'HEAD';
       if (!parent && (typeof ref !== 'string' || ref.startsWith('-') || /[\0\r\n]/.test(ref))) throw new Error('Invalid base_ref');
-      const baseCommit = parent?.baseCommit || await git(repository, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], false, this.childEnv);
+      const baseCommit = parent?.baseCommit || forkSource?.baseCommit || await git(repository, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], false, this.childEnv);
       const id = `task-${randomUUID()}`; const dir = this.jobDir(id);
       const worktree = parent?.worktree || path.join(this.worktreesDir, id);
       const branch = parent?.branch || `codex/pi/${id.slice(5)}`;
-      const dirty = !parent && !!await git(repository, ['status', '--porcelain', '--untracked-files=all'], false, this.childEnv);
+      const dirty = !parent && !forkSource && !!await git(repository, ['status', '--porcelain', '--untracked-files=all'], false, this.childEnv);
       if (parent) {
         const actualWorktree = await fs.realpath(parent.worktree);
         if (actualWorktree !== parent.worktree || actualWorktree !== await fs.realpath(await git(actualWorktree, ['rev-parse', '--show-toplevel'], false, this.childEnv))) throw new Error('Parent worktree changed');
@@ -213,27 +343,30 @@ export class Manager {
         }
       }
       const sessionDir = parent?.sessionDir || path.join(this.config.stateDir, 'sessions', id);
-      const job = { id, title: parent?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt,
+      if ((parent || forkSource) && input.materials !== undefined && stable(input.materials) !== stable((parent || forkSource).materials || [])) throw new Error('Continuation materials must match source selection');
+      const materials = (parent || forkSource)?.materials || input.materials || [];
+      const verificationIds = input.verification_ids ?? [];
+      if (!Array.isArray(materials) || new Set(materials).size !== materials.length || materials.length > 32 || materials.some(id => typeof id !== 'string' || !this.config.offlineMaterials?.materials?.some(item => item.id === id))) throw new Error('Invalid materials selection');
+      if (!Array.isArray(verificationIds) || new Set(verificationIds).size !== verificationIds.length || verificationIds.length > (this.config.verification?.maxSelected ?? 0) || verificationIds.some(id => typeof id !== 'string' || !this.config.verification?.commands?.some(item => item.id === id))) throw new Error('Invalid verification selection');
+      if (mode === 'review' && verificationIds.some(id => !this.config.verification.commands.find(item => item.id === id).readOnly)) throw new Error('Review verifier requires administrator readOnly declaration');
+      const images = normalizeImages(input.images || []);
+      const job = { id, title: parent?.title || forkSource?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt, images,
         mode, provider, model, thinkingLevel: parent?.thinkingLevel || input.thinking_level || this.config.thinkingLevel,
         timeoutSeconds, maxTurns, requestId: input.request_id, requestHash, parentJobId: parentId || undefined,
-        sessionDir, sessionFile: parent?.sessionFile, status: 'starting', createdAt: now(),
+        forkJobId: forkFromId || undefined,
+        sessionDir, sessionFile: parent?.sessionFile, materials, verificationIds, status: this.config.queue ? 'queued' : 'starting', createdAt: now(),
         ...(dirty ? { warning: 'Source has uncommitted changes; only selected commit is present in worktree.' } : {}) };
-      await fs.mkdir(dir, { mode: 0o700 }); await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
+      if (this.config.queue) { job.queueExpiresAt = new Date(Date.now() + this.config.queue.maxWaitSeconds * 1000).toISOString(); job.queueOrder = 1 + jobs.reduce((maximum, item) => Math.max(maximum, item.queueOrder || 0), 0); job.policyDigest = sha(stable(this.frozenPolicy(job))); job.sourceConfigDigest = await this.sourceConfigDigest(); }
+      await fs.mkdir(dir, { mode: 0o700 }); if (!this.config.queue) await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
       await atomicJson(path.join(dir, 'job.json'), job);
+      if (input.request_id) {
+        const tombstones = path.join(this.config.stateDir, 'request-ids'); await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
+        await fs.writeFile(path.join(tombstones, sha(input.request_id) + '.json'), JSON.stringify({ id, requestHash, createdAt: job.createdAt }), { flag: 'wx', mode: 0o600 });
+      }
       try {
+        if (this.config.queue) { await this.ensureDispatcher(); return { ...await this.public(job), artifactsDir: dir }; }
         if (!parent) await git(repository, ['worktree', 'add', '-b', branch, worktree, baseCommit], false, this.childEnv);
-        await this.seedAgent();
-        await atomicJson(path.join(dir, 'runtime.json'), { piPath: this.config.piPath, piArgs: this.config.piArgs || [],
-          agentDir: this.agentDir, allowedCommands: this.config.allowedCommands || [], policyExtension: path.join(codeRoot, 'src', 'policy-extension.mjs'),
-          ownedModelsRequired: !!await fs.stat(path.join(this.agentDir, 'models.json')).then(() => true, () => false),
-          ownedAuthRequired: !!await fs.stat(path.join(this.agentDir, 'auth.json')).then(() => true, () => false) });
-        if (this.spawnWorker) {
-          const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'worker.mjs'), dir], {
-            cwd: codeRoot, detached: true, stdio: 'ignore', env: { ...this.childEnv, PI_CODING_AGENT_DIR: this.agentDir }
-          });
-          await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-          child.unref(); await fs.writeFile(path.join(dir, 'worker.pid'), String(child.pid), { mode: 0o600 });
-        }
+        await this.launchWorker(job);
         return { ...await this.public(job), artifactsDir: dir };
       } catch (error) {
         await atomicJson(path.join(dir, 'job.json'), { ...job, status: 'failed', error: error.message, finishedAt: now() });
@@ -245,30 +378,154 @@ export class Manager {
     assertId(id); const until = Date.now() + Math.min(Math.max(Number(waitSeconds) || 0, 0), 45) * 1000;
     while (true) {
       const job = await this.read(id);
-      const marker = Number(await fs.readFile(path.join(this.jobDir(id), 'worker.pid'), 'utf8').catch(() => '0'));
-      const pid = job.workerPid || marker;
-      const current = ['starting', 'running'].includes(job.status) && pid && !alive(pid) ? await this.recover(job)
-        : job.status === 'starting' && !pid && Date.now() - Date.parse(job.createdAt) > 15000 ? await this.recover(job) : job;
+      const current = ['starting', 'running', 'finalizing'].includes(job.status) && job.workerIdentity && await identityState(job.workerIdentity).catch(() => 'unknown') !== 'same' ? await this.recover(job)
+        : job.status === 'starting' && !job.workerIdentity && Date.now() - Date.parse(job.admittedAt || job.createdAt) > 15000 ? await this.recover(job)
+        : job.status === 'queued' && Date.now() >= Date.parse(job.queueExpiresAt) ? await this.expireQueue(id) : job;
       if (!active.has(current.status) || Date.now() >= until) return await this.public(current);
       await sleep(400);
     }
   }
+  async expireQueue(id) {
+    return this.lock(async () => {
+      const job = await this.read(id);
+      if (job.status !== 'queued' || Date.now() < Date.parse(job.queueExpiresAt)) return job;
+      job.status = 'queue_expired'; job.error = 'Queue wait expired before admission'; job.finishedAt = now();
+      await atomicJson(path.join(this.jobDir(id), 'job.json'), job); return job;
+    });
+  }
+  async recoverJob(id, { terminate = false } = {}) {
+    return this.lock(async () => {
+      const job = await this.read(id);
+      if (job.status !== 'quarantined') throw new Error('Only quarantined jobs may be recovered');
+      const worker = job.workerIdentity ? await groupState(job.workerIdentity) : { state: 'unknown' };
+      const pi = job.piIdentity ? await groupState(job.piIdentity) : job.piPid ? { state: 'unknown' } : { state: 'stopped' };
+      const verifiers = [];
+      for (const record of job.verifierIdentities || []) verifiers.push(await groupState(record));
+      const evidence = { worker, pi, verifiers };
+      if (!terminate) return { job_id: id, status: job.status, evidence, recoverable: worker.state === 'stopped' && pi.state === 'stopped' && verifiers.every(item => item.state === 'stopped') };
+      if ([worker, pi, ...verifiers].some(item => item.state === 'ambiguous' || item.state === 'unknown')) return { job_id: id, status: 'quarantined', evidence, reason: 'Ambiguous ownership' };
+      for (const record of [job.piIdentity, ...(job.verifierIdentities || []), job.workerIdentity].filter(Boolean)) {
+        const state = await groupState(record);
+        if (state.state === 'owned') {
+          const outcome = await stopOwnedGroup(record);
+          if (outcome.state !== 'stopped') return { job_id: id, status: 'quarantined', evidence, reason: 'Process group could not be proved stopped' };
+        }
+      }
+      job.status = 'interrupted'; job.error = 'Recovered after verified process-group stop'; job.finishedAt = now();
+      await atomicJson(path.join(this.jobDir(id), 'job.json'), job);
+      return { job_id: id, status: job.status, evidence };
+    });
+  }
+  async cleanup({ job_ids = [], older_than_days, dry_run = true } = {}) {
+    if (!Array.isArray(job_ids) || job_ids.length > 100 || new Set(job_ids).size !== job_ids.length || job_ids.some(id => !idPattern.test(id))) throw new Error('Invalid cleanup job_ids');
+    if (older_than_days !== undefined && (!Number.isInteger(older_than_days) || older_than_days < 0 || older_than_days > 3650)) throw new Error('Invalid retention filter');
+    if (!dry_run && job_ids.length === 0 && older_than_days === undefined) throw new Error('Destructive cleanup requires an explicit cleanup selection or retention filter');
+    const effectiveAge = older_than_days === undefined && dry_run && job_ids.length === 0 ? this.config.retention?.terminalDays : older_than_days;
+    return this.lock(async () => {
+      const jobs = await this.all();
+      for (const id of job_ids) if (!jobs.some(job => job.id === id)) throw new Error(`Cleanup job not found: ${id}`);
+      const selected = jobs.filter(job => job_ids.includes(job.id) || effectiveAge !== undefined && terminal.has(job.status) && Date.now() - Date.parse(job.finishedAt || job.createdAt) >= effectiveAge * 86400000);
+      const ids = new Set(selected.map(job => job.id)); const refused = [], candidates = [];
+      for (const job of selected) {
+        const reason = !terminal.has(job.status) ? 'not_terminal' : jobs.some(other => !ids.has(other.id) && (other.parentJobId === job.id || other.forkJobId === job.id || other.worktree === job.worktree || other.sessionDir === job.sessionDir)) ? 'referenced' : job.exportedAt ? 'export_reference' : null;
+        if (reason) { refused.push({ id: job.id, reason }); continue; }
+        if (!job.worktree.startsWith(this.worktreesDir + path.sep) || path.dirname(job.worktree) !== this.worktreesDir || !job.branch.startsWith('codex/pi/')) { refused.push({ id: job.id, reason: 'ownership_path' }); continue; }
+        candidates.push(job);
+      }
+      if (dry_run) return { dryRun: true, candidates: candidates.map(job => job.id), refused };
+      if (refused.length) throw new Error(`Cleanup refused: ${JSON.stringify(refused)}`);
+      const sessionsRoot = path.join(this.config.stateDir, 'sessions');
+      const sessions = new Set(candidates.map(job => job.sessionDir));
+      for (const sessionDir of sessions) {
+        if (!sessionDir || path.dirname(sessionDir) !== sessionsRoot || !idPattern.test(path.basename(sessionDir))) throw new Error('Cleanup session ownership path invalid');
+        const present = await fs.realpath(sessionDir).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+        if (present && (present !== sessionDir || !(await fs.lstat(sessionDir)).isDirectory())) throw new Error('Cleanup session ownership changed');
+      }
+      const worktrees = new Set();
+      for (const job of candidates) {
+        if (worktrees.has(job.worktree)) continue; worktrees.add(job.worktree);
+        const present = await fs.realpath(job.worktree).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+        if (present) {
+          if (present !== job.worktree || await git(job.worktree, ['rev-parse', '--show-toplevel'], false, this.childEnv) !== job.worktree || await git(job.worktree, ['branch', '--show-current'], false, this.childEnv) !== job.branch) throw new Error('Cleanup worktree ownership changed');
+          if (await git(job.repository, ['rev-parse', job.branch], false, this.childEnv) !== job.baseCommit) throw new Error('Cleanup branch contains commits');
+          await git(job.repository, ['worktree', 'remove', '--force', job.worktree], false, this.childEnv);
+          await git(job.repository, ['branch', '-D', job.branch], false, this.childEnv);
+        }
+      }
+      for (const job of candidates) {
+        const dir = this.jobDir(job.id);
+        if (await fs.realpath(dir) !== dir || JSON.parse(await fs.readFile(path.join(dir, 'job.json'), 'utf8')).id !== job.id) throw new Error('Cleanup job ownership changed');
+        await fs.rm(dir, { recursive: true });
+      }
+      for (const sessionDir of sessions) await fs.rm(sessionDir, { recursive: true, force: true });
+      return { dryRun: false, removed: candidates.map(job => job.id), refused: [] };
+    });
+  }
   async result(id) {
     const job = await this.status(id); const dir = this.jobDir(id);
-    const headerSecrets = await this.headerSecretValues();
-    const tail = async (name, max) => {
-      const handle = await fs.open(path.join(dir, name), 'r').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
-      if (!handle) return '';
-      try { const stat = await handle.stat(); const buf = Buffer.alloc(Math.min(max, stat.size)); await handle.read(buf, 0, buf.length, stat.size - buf.length); return sanitize(buf.toString('utf8'), this.childEnv, headerSecrets); }
-      finally { await handle.close(); }
-    };
-    return { ...job, result: await tail('result.txt', 24000), stderrTail: await tail('stderr.log', 4000), diffPreview: await tail('changes.patch', 24000), artifactsDir: dir,
-      untrackedNote: 'Patch contains tracked changes only; inspect changedFiles and preserved worktree for new files.' };
+    return this.lock(async () => {
+      const headerSecrets = await this.headerSecretValues();
+      const preview = async (name, max) => {
+        const handle = await fs.open(path.join(dir, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+        if (!handle) return { text: '', truncated: false };
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16 * 1024 * 1024) return { text: '', truncated: true };
+          const buf = Buffer.alloc(stat.size); let offset = 0;
+          while (offset < buf.length) { const read = await handle.read(buf, offset, buf.length - offset, offset); if (!read.bytesRead) throw new Error('Result file changed'); offset += read.bytesRead; }
+          const clean = sanitize(buf.toString('utf8'), this.childEnv, headerSecrets);
+          return { text: clean.slice(0, max), truncated: clean.length > max };
+        } finally { await handle.close(); }
+      };
+      const [result, stderr, diff] = await Promise.all([preview('result.txt', 24000), preview('stderr.log', 4000), preview('changes.patch', 24000)]);
+      return { ...job, result: result.text, resultPreviewTruncated: result.truncated || !!job.resultOmitted,
+        stderrTail: stderr.text, stderrPreviewTruncated: stderr.truncated || !!job.stderrTruncated,
+        diffPreview: diff.text, diffPreviewTruncated: diff.truncated || !!job.diffPreviewTruncated, artifactsDir: dir,
+        untrackedNote: 'Patch contains tracked changes only; inspect artifacts for new files.' };
+    });
+  }
+  async artifacts(id, options = {}) { return this.lock(async () => { const job = await this.read(id); if (!terminal.has(job.status)) throw new Error('Artifacts require a terminal job'); return listArtifacts(this.jobDir(id), options); }); }
+  async readArtifact(id, options = {}) { return this.lock(async () => { const job = await this.read(id); if (!terminal.has(job.status)) throw new Error('Artifacts require a terminal job'); return readArtifact(this.jobDir(id), options); }); }
+  async fork(id, input) {
+    if (!this.config.queue) throw new Error('Fork requires queued runtime configuration');
+    return this.start(input, null, { forkFromId: id });
+  }
+  async steer(id, { message, images = [] } = {}) {
+    required(message, 'message', 2000);
+    const normalized = normalizeImages(images);
+    const controlId = randomUUID();
+    const dir = this.jobDir(id);
+    await this.lock(async () => {
+      const job = await this.read(id);
+      if (job.status !== 'running') throw new Error('Steering requires a running job');
+      const controls = path.join(dir, 'controls'); await fs.mkdir(controls, { recursive: true, mode: 0o700 });
+      const names = await fs.readdir(controls);
+      if (names.length >= 120) throw new Error('Steering receipt store full');
+      if (names.filter(name => name.startsWith('pending-')).length >= 8) throw new Error('Steering queue full');
+      await atomicJson(path.join(controls, `pending-${controlId}.json`), { id: controlId, message, images, createdAt: now() });
+    });
+    let latestAck = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const ack = await fs.readFile(path.join(dir, 'controls', `ack-${controlId}.json`), 'utf8').then(JSON.parse, error => error.code === 'ENOENT' ? null : Promise.reject(error));
+      if (ack) { latestAck = ack; if (ack.status !== 'received') return { control_id: controlId, status: ack.status, disposition: ack.disposition || null }; }
+      await sleep(100);
+    }
+    if (latestAck) return { control_id: controlId, status: 'received', disposition: null };
+    return { control_id: controlId, status: 'unknown', note: 'No worker acknowledgement; this control will not be replayed automatically.' };
   }
   async cancel(id) {
-    const job = await this.status(id); if (!active.has(job.status)) return job;
-    await fs.writeFile(path.join(this.jobDir(id), 'cancel'), now(), { mode: 0o600 });
-    return { ...job, cancellationRequested: true };
+    await this.status(id);
+    return this.lock(async () => {
+      const current = await this.read(id);
+      if (current.status === 'queued') {
+        current.status = 'cancelled'; current.finishedAt = now(); current.error = 'Cancelled before admission';
+        await atomicJson(path.join(this.jobDir(id), 'job.json'), current);
+        return { ...await this.public(current), cancellationRequested: true };
+      }
+      if (!['starting', 'running', 'finalizing'].includes(current.status)) return this.public(current);
+      await fs.writeFile(path.join(this.jobDir(id), 'cancel'), now(), { mode: 0o600 });
+      return { ...await this.public(current), cancellationRequested: true };
+    });
   }
   async health() {
     const version = (await exec(this.config.piPath, [...(this.config.piArgs || []), '--version'], { env: this.childEnv, timeout: 10000 })).stdout.trim();
@@ -278,9 +535,15 @@ export class Manager {
     const authenticationPresent = await fileExists(path.join(this.agentDir, 'auth.json')) || await fileExists(this.config.authFile)
       || (this.config.agentDir && await fileExists(path.join(this.config.agentDir, 'auth.json')))
       || !!this.config.envAllowlist?.some(key => /KEY|TOKEN|AUTH|CREDENTIAL|SECRET/i.test(key) && this.childEnv[key]);
+    const jobs = await this.all();
+    const retentionDays = this.config.retention?.terminalDays ?? 30;
+    const retentionCandidates = jobs.filter(job => terminal.has(job.status) && Date.now() - Date.parse(job.finishedAt || job.createdAt) >= retentionDays * 86400000);
     return { version, allowedRoots: this.config.allowedRoots, stateDir: this.config.stateDir, maxConcurrent: this.config.maxConcurrent,
-      activeJobs: (await this.all()).filter(job => active.has(job.status)).length,
+      activeJobs: jobs.filter(job => active.has(job.status)).length,
       authenticationPresent: !!authenticationPresent,
-      authenticationNote: 'Credential presence does not prove authentication.', requiredTools: { rg: await which('rg'), fd: await which('fd') } };
+      authenticationNote: 'Credential presence does not prove authentication.', requiredTools: { rg: await which('rg'), fd: await which('fd') },
+      storage: this.config.retention ? await scanState(this.config.stateDir, this.config.retention) : null,
+      queuedJobs: jobs.filter(job => job.status === 'queued').length, retentionCandidateCount: retentionCandidates.length,
+      retentionCandidateIdsPreview: retentionCandidates.slice(0, 20).map(job => job.id), retentionDays };
   }
 }

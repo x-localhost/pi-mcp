@@ -59,7 +59,7 @@ test('released Pi 1.4.0 forwards configured custom headers and existing Bearer a
       { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', MOCK_API_KEY: 'test-only-key', CORP_CLIENT_ID: 'client-42', CORP_TRACE_ID: 'trace-99', CORP_OVERRIDE: 'override-7' }).init();
     const start = await manager.start({ repository, title: 'Real Pi header round trip', prompt: 'Respond briefly.', provider: 'mock', model: 'mock' });
     let status;
-    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['starting', 'running'].includes(status.status)) break; await pause(100); }
+    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await pause(100); }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(start.id)));
     assert.equal(requests, 2);
     // Normal Bearer compatibility: a configured apiKey still produces Pi's own
@@ -103,7 +103,7 @@ test('a custom Authorization header takes precedence over Pi\'s SDK-generated Be
       { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', MOCK_API_KEY: 'test-only-key', CORP_CUSTOM_TOKEN: 'custom-token-value' }).init();
     const start = await manager.start({ repository, title: 'Custom auth header', prompt: 'Respond briefly.', provider: 'mock', model: 'mock' });
     let status;
-    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['starting', 'running'].includes(status.status)) break; await pause(100); }
+    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await pause(100); }
     assert.equal(status.status, 'completed', JSON.stringify(await manager.result(start.id)));
     // Unverified-until-run: docs/corporate-headers-plan.md explicitly warns not to
     // claim the SDK's automatic Authorization is suppressed without proof. This

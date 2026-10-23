@@ -3,7 +3,7 @@ import path from 'node:path';
 import { assertSandbox } from './sandbox.mjs';
 import { loadAndValidateProfile } from './profile.mjs';
 import { validateConfig } from '../src/config.mjs';
-import { Manager } from '../src/manager.mjs';
+import { Manager, atomicJson } from '../src/manager.mjs';
 import { exportArtifactBundle } from '../src/artifacts.mjs';
 import fs from 'node:fs/promises';
 
@@ -15,9 +15,11 @@ try {
   const manager = await new Manager(config, {}, { spawnWorker: false }).init();
   await manager.lock(async () => {
     const job = await manager.read(jobId);
-    if (!['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted'].includes(job.status)) throw new Error('terminal job required');
+    if (!['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'budget_limit', 'budget_unavailable', 'queue_expired'].includes(job.status)) throw new Error('terminal job required');
     const bundle = await exportArtifactBundle(path.join(manager.jobsDir, jobId));
     await new Promise((resolve, reject) => process.stdout.write(JSON.stringify(bundle) + '\n', error => error ? reject(error) : resolve()));
+    job.exportedAt = new Date().toISOString();
+    await atomicJson(path.join(manager.jobsDir, jobId, 'job.json'), job);
   });
 } catch (error) {
   console.error(`artifact export refused: ${error.message}`);

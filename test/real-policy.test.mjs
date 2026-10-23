@@ -51,7 +51,7 @@ async function exercise({ mode, tool, args, allowedCommands = [], cancel = false
       await delay(350); await manager.cancel(start.id);
     }
     let status;
-    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['starting', 'running'].includes(status.status)) break; await delay(100); }
+    for (let i = 0; i < 100; i++) { status = await manager.status(start.id); if (!['queued', 'starting', 'running', 'finalizing', 'verifying'].includes(status.status)) break; await delay(100); }
     return { status, result: await manager.result(start.id), worktree: start.worktree, requests };
   } finally { await new Promise(resolve => gateway.close(resolve)); }
 }
