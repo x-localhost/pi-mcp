@@ -10,7 +10,7 @@ Linux Docker Engine과 [Docker Compose 2.30 이상](https://docs.docker.com/refe
 
 이미지 빌드에는 Node 24.22.0 이미지, 잠긴 `npm ci --ignore-scripts`, Debian 패키지 미러가 필요합니다. 실행 중에는 패키지 설치를 하지 않습니다. 폐쇄망에서는 승인된 이미지·npm·OS 미러 또는 오프라인 빌드 산출물을 먼저 준비하세요. 이미지 태그와 Compose 프로젝트명은 작업별로 고유하게 지정하세요. 앱 코드는 이미지 내부의 root 소유 읽기 전용 파일입니다.
 
-`internal-agent/config.example.json`, `models.example.json`, `gateway.example.json`을 각각 **개별 정규 파일**로 복사해 사내 값으로 수정하세요. 세 파일의 모델 ID는 같아야 합니다. agent 설정의 경로, 실행 파일, provider, 루프백 URL, 더미 API 키는 바꾸지 마세요. 실제 인증 헤더 값은 별도의 gateway 전용 환경 파일에만 넣습니다. 예시는 자리표시자이며 실제 서비스 주소나 비밀값을 포함하지 않습니다. CA 파일도 별도의 정규 파일로 준비합니다. 설정 디렉터리 자체를 마운트하지 않습니다.
+`internal-agent/config.example.json`, `models.example.json`, `gateway.example.json`을 각각 **개별 정규 파일**로 복사해 사내 값으로 수정하세요. 세 파일의 모델 ID는 같아야 합니다. 모델의 `maxTokens`는 gateway `limits.maxOutputTokens` 이하로 설정하세요(생략 시 gateway 한도는 4096이며, 허용 범위는 1–16384입니다). agent 설정의 경로, 실행 파일, provider, 루프백 URL, 더미 API 키는 바꾸지 마세요. 실제 인증 헤더 값은 별도의 gateway 전용 환경 파일에만 넣습니다. 예시는 자리표시자이며 실제 서비스 주소나 비밀값을 포함하지 않습니다. CA 파일도 별도의 정규 파일로 준비합니다. 설정 디렉터리 자체를 마운트하지 않습니다.
 
 Gateway 환경 파일은 헤더가 참조하는 변수만 `KEY=VALUE` 형식으로 넣고 `chmod 600 /private/absolute/gateway.env`로 소유자만 읽고 쓸 수 있게 설정하세요. `format: raw`이므로 값에 따옴표를 덧붙이거나 `$`를 이스케이프하지 않습니다. Node 로더·프록시 등 프로세스 제어용 변수는 허용하지 않습니다.
 

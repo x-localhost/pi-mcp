@@ -77,7 +77,15 @@ def main():
         models = json.load(handle)
     with open(os.environ["PI_INTERNAL_GATEWAY_CONFIG_FILE"], encoding="utf-8") as handle:
         gateway_config = json.load(handle)
-    require(config.get("model") == gateway_config.get("model") == models.get("providers", {}).get("corporate", {}).get("models", [{}])[0].get("id"), "agent and gateway model IDs differ")
+    model = models.get("providers", {}).get("corporate", {}).get("models", [{}])[0]
+    require(config.get("model") == gateway_config.get("model") == model.get("id"), "agent and gateway model IDs differ")
+    model_max_tokens = model.get("maxTokens")
+    gateway_limits = gateway_config.get("limits", {})
+    require(isinstance(gateway_limits, dict), "gateway limits must be an object")
+    gateway_max_output_tokens = gateway_limits.get("maxOutputTokens", 4096)
+    require(type(model_max_tokens) is int and model_max_tokens > 0, "model maxTokens must be a positive integer")
+    require(type(gateway_max_output_tokens) is int and 1 <= gateway_max_output_tokens <= 16384, "gateway maxOutputTokens must be an integer from 1 to 16384")
+    require(model_max_tokens <= gateway_max_output_tokens, "model maxTokens exceeds gateway maxOutputTokens")
     require(gateway_config.get("caFile") == "/etc/pi-internal/ca.pem", "gateway CA path mismatch")
     declared = config.get("approvedMcp", {"servers": []})
     require(isinstance(declared, dict) and set(declared) == {"servers"} and isinstance(declared["servers"], list), "approved MCP declaration invalid")
