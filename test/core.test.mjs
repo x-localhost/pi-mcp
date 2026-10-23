@@ -12,12 +12,17 @@ test('policy rejects unknown tools, traversal, symlink and git administration', 
   await fs.mkdir(path.join(root, '.git'));
   await fs.symlink(os.tmpdir(), path.join(root, 'escape'));
   await fs.symlink(path.join(root, '.git'), path.join(root, 'git-alias'));
+  await fs.symlink(path.join(os.tmpdir(), 'missing-pi-target'), path.join(root, 'dangling'));
   const policy = { worktree: root, mode: 'implement', allowedCommands: ['npm test'] };
   assert.equal((await authorizeTool(policy, 'unknown', {})).allow, false);
   assert.equal((await authorizeTool(policy, 'read', { path: '../outside' })).allow, false);
   assert.equal((await authorizeTool(policy, 'read', { path: 'escape/x' })).allow, false);
   assert.equal((await authorizeTool(policy, 'read', { path: '.git/config' })).allow, false);
   assert.equal((await authorizeTool(policy, 'read', { path: 'git-alias/config' })).allow, false);
+  for (const pathInput of ['@/tmp/outside', '~/outside', '@.git/config', '.GIT/config', '.Pi-Mcp-Policy/rules', 'dangling/new.txt', '\u202f.git/config']) {
+    assert.equal((await authorizeTool(policy, 'write', { path: pathInput, content: 'x' })).allow, false, pathInput);
+  }
+  assert.equal((await authorizeTool(policy, 'write', { path: 'safe-new.txt', content: 'x' })).allow, true);
   assert.equal((await authorizeTool(policy, 'bash', { command: 'npm test' })).allow, false);
   assert.equal((await authorizeTool(policy, 'safe_shell', { command: 'npm test && id' })).allow, false);
   assert.equal((await authorizeTool(policy, 'safe_shell', { command: 'npm test' })).allow, true);
@@ -48,4 +53,21 @@ test('RPC waits for matching response and settled event, retaining U+2028', asyn
   input.write(JSON.stringify({ type: 'agent_settled' }) + '\n');
   assert.equal((await settled).type, 'agent_settled');
   client.close();
+});
+
+test('RPC error event is data and does not throw without an error listener', async () => {
+  const { PassThrough } = await import('node:stream');
+  const input = new PassThrough(); const output = new PassThrough();
+  const client = new RpcClient(input, output);
+  let observed;
+  client.on('event', event => { observed = event; });
+  input.write('{"type":"error","message":"provider failed"}\n');
+  assert.equal(observed.message, 'provider failed');
+  client.close();
+});
+
+test('custom credential env names are masked in public text', () => {
+  const secret = 'company-private-credential';
+  assert.equal(sanitize(`error ${secret}`, { CORP_AUTH: secret }).includes(secret), false);
+  assert.equal(sanitize(`error ${secret}`, { CORP_CREDENTIAL: secret }).includes(secret), false);
 });

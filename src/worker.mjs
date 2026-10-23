@@ -18,9 +18,13 @@ const save = () => { const snapshot = structuredClone(job); saveChain = saveChai
 const now = () => new Date().toISOString();
 const sessionRoot = await fs.realpath(job.sessionDir);
 let child, rpc, stopping, finalText = '', settled = false, finalStopReason, providerError = '', stderr = '', logBytes = 0;
+const stopTimers = [];
 const secretValues = [];
 const collectSecrets = (value, key = '', sensitive = false) => {
-  if (typeof value === 'string' && (sensitive || /(?:token|key|secret|password|access|refresh)/i.test(key)) && value.length >= 6 && !value.startsWith('$')) secretValues.push(value);
+  if (typeof value === 'string' && (sensitive || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
+    const resolved = /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? process.env[value.slice(1)] : value;
+    if (typeof resolved === 'string' && resolved.length >= 6) secretValues.push(resolved);
+  }
   else if (value && typeof value === 'object') for (const [childKey, entry] of Object.entries(value)) collectSecrets(entry, childKey, sensitive || /headers?/i.test(key));
 };
 const refreshSecrets = async () => {
@@ -30,14 +34,6 @@ const refreshSecrets = async () => {
 };
 await refreshSecrets();
 const clean = value => sanitize(value, process.env, secretValues);
-process.on('uncaughtException', async error => {
-  try {
-    await refreshSecrets();
-    await writePrivate('worker-error.log', clean(error?.stack || String(error)));
-    job.status = 'failed'; job.error = clean(error?.message || String(error)); job.finishedAt = now();
-    await save();
-  } finally { process.exit(1); }
-});
 const addUsage = usage => {
   if (!usage || typeof usage !== 'object') return;
   const previous = job.usage || {};
@@ -72,8 +68,9 @@ async function stop(reason) {
     await rpc.request('clear_queue', {}, 1000).catch(() => {});
     rpc.request('abort', {}, 2000).catch(() => {});
   }
-  setTimeout(() => groupSignal('SIGTERM'), 1500).unref();
-  setTimeout(() => groupSignal('SIGKILL'), 4000).unref();
+  stopTimers.push(setTimeout(() => groupSignal('SIGTERM'), 1500));
+  stopTimers.push(setTimeout(() => groupSignal('SIGKILL'), 4000));
+  for (const timer of stopTimers) timer.unref();
 }
 async function inventory() {
   try {
@@ -128,12 +125,17 @@ async function run() {
       const message = event.message;
       finalStopReason = message.stopReason;
       if (message.stopReason === 'error' || message.stopReason === 'aborted') providerError = message.errorMessage || message.stopReason;
+      else if (message.stopReason === 'stop' || message.stopReason === 'end_turn') providerError = '';
       const text = (message.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n');
       if (text) { finalText = (finalText + '\n' + text).slice(-50000); job.lastProgress = 'Assistant response received'; }
       addUsage(message.usage);
     }
     if (event.type === 'agent_settled') settled = true;
-    if (event.type === 'error' || event.type === 'provider_error') providerError = clean(event.message || event.error || 'Provider error');
+    if (event.type === 'auto_retry_end' && event.success === true) providerError = '';
+    if (event.type === 'error' || event.type === 'provider_error') {
+      providerError = clean(event.message || event.error || 'Provider error');
+      if (event.type === 'error') stop('failed').catch(() => {});
+    }
   });
   const readinessDeadline = Date.now() + 15000;
   let policyReady = false;
@@ -152,7 +154,10 @@ async function run() {
   await save();
   if (stopping) throw new Error(`Stopped during startup: ${stopping}`);
   const selected = await rpc.request('set_model', { provider: job.provider, modelId: job.model });
-  job.effectiveModel = selected.data?.model?.id ? `${selected.data.model.provider}/${selected.data.model.id}` : `${job.provider}/${job.model}`;
+  const observedState = (await rpc.request('get_state')).data;
+  const observed = observedState?.model || selected.data?.model || selected.data;
+  if (observed?.provider !== job.provider || observed?.id !== job.model) throw new Error('Pi selected a different provider/model');
+  job.effectiveModel = `${observed.provider}/${observed.id}`;
   if (job.thinkingLevel) await rpc.request('set_thinking_level', { level: job.thinkingLevel });
   if (stopping) throw new Error(`Stopped during startup: ${stopping}`);
   const settledPromise = rpc.waitFor('agent_settled', (job.timeoutSeconds + 10) * 1000);
@@ -169,17 +174,15 @@ async function run() {
   if (!stopping && !finalText.trim()) throw new Error('Pi settled without an assistant result');
 }
 
-const watchdog = setInterval(async () => {
-  try {
-    job.heartbeatAt = now(); await save();
-    if (await fs.stat(path.join(dir, 'cancel')).then(() => true, () => false)) await stop('cancelled');
-    if (job.startedAt && Date.now() - Date.parse(job.startedAt) >= job.timeoutSeconds * 1000) await stop('timed_out');
-  } catch (error) { providerError = clean(error.message); await stop('failed').catch(() => {}); }
-}, 500);
-try { await run(); }
-catch (error) { providerError = clean(error.message); if (!stopping) stopping = 'failed'; }
-finally {
+let finalizing;
+async function finalize() {
+  if (finalizing) return finalizing;
+  finalizing = finalizeOnce();
+  return finalizing;
+}
+async function finalizeOnce() {
   clearInterval(watchdog);
+  for (const timer of stopTimers) clearTimeout(timer);
   if (child?.pid) {
     groupSignal('SIGTERM'); await delay(500);
     if (await groupRunning()) { groupSignal('SIGKILL'); await delay(500); }
@@ -204,5 +207,34 @@ finally {
   await writePrivate('result.txt', finalText || providerError || `Stopped: ${stopping}`);
   await writePrivate('stderr.log', stderr);
   await save();
+  for (const timer of stopTimers) clearTimeout(timer);
   rpc?.close();
 }
+const watchdog = setInterval(async () => {
+  try {
+    job.heartbeatAt = now(); await save();
+    if (await fs.stat(path.join(dir, 'cancel')).then(() => true, () => false)) await stop('cancelled');
+    if (job.startedAt && Date.now() - Date.parse(job.startedAt) >= job.timeoutSeconds * 1000) await stop('timed_out');
+  } catch (error) { providerError = clean(error.message); await stop('failed').catch(() => {}); }
+}, 500);
+let fatalHandling = false;
+async function fatal(error) {
+  if (fatalHandling) return;
+  fatalHandling = true;
+  providerError = clean(error?.message || String(error));
+  if (!stopping) stopping = 'failed';
+  try {
+    await refreshSecrets();
+    await writePrivate('worker-error.log', error?.stack || String(error));
+    await finalize();
+  } catch (cleanupError) {
+    job.status = 'quarantined'; job.error = clean(`Worker cleanup could not be verified: ${cleanupError.message}`);
+    job.finishedAt = now(); await save().catch(() => {});
+  }
+  process.exit(1);
+}
+process.on('uncaughtException', fatal);
+process.on('unhandledRejection', fatal);
+try { await run(); }
+catch (error) { providerError = clean(error.message); if (!stopping) stopping = 'failed'; }
+finally { await finalize(); }

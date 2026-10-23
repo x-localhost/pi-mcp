@@ -23,7 +23,7 @@ export class RpcClient extends EventEmitter {
         if (event.command !== command || !event.success) reject(new Error(event.error || `RPC ${command} failed`));
         else resolve(event);
       }
-      this.emit('event', event); this.emit(event.type, event);
+      this.emit('event', event); this.emit(event.type === 'error' ? 'rpc_error' : event.type, event);
     }
   }
   request(type, fields = {}, timeoutMs = 15000) {

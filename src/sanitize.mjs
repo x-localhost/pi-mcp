@@ -1,5 +1,5 @@
 export function sanitize(value, env = process.env, extraSecrets = []) {
-  const secrets = [...Object.entries(env).filter(([key, val]) => /(?:token|key|secret|password|proxy)/i.test(key) && typeof val === 'string' && val.length >= 6).map(([, val]) => val), ...extraSecrets].filter(v => typeof v === 'string' && v.length >= 6);
+  const secrets = [...Object.entries(env).filter(([key, val]) => /(?:token|key|secret|password|proxy|auth|credential)/i.test(key) && typeof val === 'string' && val.length >= 6).map(([, val]) => val), ...extraSecrets].filter(v => typeof v === 'string' && v.length >= 6);
   for (const [key, raw] of Object.entries(env)) {
     if (!/proxy/i.test(key) || typeof raw !== 'string') continue;
     try {

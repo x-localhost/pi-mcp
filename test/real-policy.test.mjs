@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { Manager } from '../src/manager.mjs';
 
 const cli = fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js', import.meta.url));
@@ -75,4 +76,11 @@ test('real Pi review blocks write and shell cancellation stops process group', {
   assert.ok(denied.result.permissionDenials.some(item => item.toolName === 'write'));
   const shell = await exercise({ mode: 'implement', tool: 'safe_shell', args: { command: 'sleep 20' }, allowedCommands: ['sleep 20'], cancel: true });
   assert.equal(shell.status.status, 'cancelled', JSON.stringify(shell.result));
+});
+
+test('real Pi denies @-normalized absolute write before the tool resolves it', { timeout: 45000 }, async () => {
+  const outside = path.join(os.tmpdir(), `pi-policy-escape-${randomUUID()}`);
+  const denied = await exercise({ mode: 'implement', tool: 'write', args: { path: `@${outside}`, content: 'escape' } });
+  assert.ok(denied.result.permissionDenials.some(item => item.toolName === 'write'));
+  assert.equal(await fs.stat(outside).then(() => true, () => false), false);
 });

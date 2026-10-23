@@ -23,7 +23,7 @@ async function setup(scenario = 'success') {
   return { manager, input };
 }
 async function finished(manager, id) {
-  for (let i = 0; i < 100; i++) { const status = await manager.status(id); if (!['starting', 'running'].includes(status.status)) return status; await delay(100); }
+  for (let i = 0; i < 150; i++) { const status = await manager.status(id); if (!['starting', 'running'].includes(status.status)) return status; await delay(100); }
   throw new Error('Job did not finish');
 }
 
@@ -87,4 +87,99 @@ test('stale status observer never overwrites a final worker snapshot', async () 
   const recovered = await manager.recover(stale);
   assert.equal(recovered.status, 'completed');
   assert.equal((await manager.read(start.id)).status, 'completed');
+});
+
+test('protocol error cannot release a still-writing Pi process', async () => {
+  const { manager, input } = await setup();
+  manager.config.maxConcurrent = 1;
+  const start = await manager.start({ ...input, prompt: '[FAKE_PROTOCOL_ERROR_WRITER]' });
+  let privateJob;
+  try {
+    const status = await finished(manager, start.id);
+    privateJob = await manager.read(start.id);
+    const marker = path.join(start.worktree, 'writer.txt');
+    const before = await fs.readFile(marker, 'utf8');
+    await delay(400);
+    const after = await fs.readFile(marker, 'utf8');
+    assert.equal(after, before, `writer continued after terminal ${status.status}`);
+    assert.ok(['failed', 'quarantined'].includes(status.status));
+  } finally {
+    privateJob ||= await manager.read(start.id);
+    if (privateJob.piPid) try { process.kill(-privateJob.piPid, 'SIGKILL'); } catch {}
+  }
+});
+
+test('uncaught RPC listener failure cleans up child before releasing slot', async () => {
+  const { manager, input } = await setup();
+  manager.config.maxConcurrent = 1;
+  const started = await manager.start({ ...input, prompt: '[FAKE_THROW_WRITER]' });
+  let privateJob;
+  try {
+    const status = await finished(manager, started.id);
+    privateJob = await manager.read(started.id);
+    const marker = path.join(started.worktree, 'writer.txt');
+    const before = await fs.readFile(marker, 'utf8');
+    await delay(400);
+    assert.equal(await fs.readFile(marker, 'utf8'), before);
+    assert.ok(['failed', 'quarantined'].includes(status.status));
+  } finally {
+    privateJob ||= await manager.read(started.id);
+    if (privateJob.piPid) try { process.kill(-privateJob.piPid, 'SIGKILL'); } catch {}
+  }
+});
+
+test('worker records observed model and rejects an unobserved selection', async () => {
+  const good = await setup();
+  const started = await good.manager.start(good.input);
+  assert.equal((await finished(good.manager, started.id)).effectiveModel, 'mock/mock');
+  const bad = await setup('wrong_model');
+  const wrong = await bad.manager.start(bad.input);
+  assert.equal((await finished(bad.manager, wrong.id)).status, 'failed');
+});
+
+test('followup starts a fresh session only when parent never recorded one', async () => {
+  const { manager, input } = await setup();
+  const first = await manager.start(input);
+  assert.equal((await finished(manager, first.id)).status, 'completed');
+  const privateJob = await manager.read(first.id);
+  delete privateJob.sessionFile;
+  await fs.writeFile(path.join(manager.jobDir(first.id), 'job.json'), JSON.stringify(privateJob));
+  const next = await manager.start({ prompt: 'Continue without recorded session' }, first.id);
+  assert.equal(next.worktree, first.worktree);
+  assert.equal((await finished(manager, next.id)).status, 'completed');
+  const nextPrivate = await manager.read(next.id);
+  assert.equal(nextPrivate.sessionDir, privateJob.sessionDir);
+  assert.ok(nextPrivate.sessionFile);
+  const tampered = await manager.read(next.id);
+  tampered.sessionFile = path.join(tampered.sessionDir, 'missing.jsonl');
+  await fs.writeFile(path.join(manager.jobDir(next.id), 'job.json'), JSON.stringify(tampered));
+  await assert.rejects(manager.start({ prompt: 'Tampered session' }, next.id), /Parent session unavailable/);
+});
+
+test('recovered provider retry clears prior error', async () => {
+  const { manager, input } = await setup('retry_success');
+  const started = await manager.start(input);
+  assert.equal((await finished(manager, started.id)).status, 'completed');
+});
+
+test('model env reference secret is absent from public and private result', async () => {
+  const { manager, input } = await setup('secret_echo');
+  const secret = 'company-private-credential';
+  manager.childEnv.CORP_SESSION = secret;
+  const modelsFile = path.join(path.dirname(manager.config.stateDir), 'models.json');
+  await fs.writeFile(modelsFile, JSON.stringify({ providers: { mock: { apiKey: '$CORP_SESSION' } } }));
+  manager.config.modelsFile = modelsFile;
+  const started = await manager.start(input);
+  assert.equal((await finished(manager, started.id)).status, 'completed');
+  const result = await manager.result(started.id);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  const privateResult = await fs.readFile(path.join(manager.jobDir(started.id), 'result.txt'), 'utf8');
+  assert.equal(privateResult.includes(secret), false);
+});
+
+test('startup deadline remains timed_out when policy readiness never arrives', { timeout: 20000 }, async () => {
+  const { manager, input } = await setup('never_ready');
+  const started = await manager.start(input);
+  const done = await finished(manager, started.id);
+  assert.equal(done.status, 'timed_out');
 });

@@ -31,3 +31,12 @@ All installs and tests ran on `gram` in task-owned `/tmp/pi-mcp-20261023/core` w
 No corporate provider endpoint or real company credential was available. `pi_health` checks credential presence only. Company proxy authentication, CA chain, actual provider model behavior and OAuth refresh against the organization's service still need validation in that environment. The mock HTTPS/CONNECT path and local authenticated gateway were verified without any paid provider request.
 
 The policy guards Pi tools and exact administrator-approved shell commands; it is not an OS sandbox. A trusted command may execute repository scripts. An orphaned worker is quarantined rather than signaling an unverified numeric PID, preserving its concurrency slot for operator inspection.
+
+## Focused review followup (same date)
+
+On the committed core handoff `c2ee2a9ed634806af18450d00d2e92486dff90dd`, added regressions for worker exception cleanup, command-bearing auth fields, model-only overrides and observed model selection, Pi path normalization/dangling symlinks, missing-session followups, credential redaction, recovered retries, and symlinked state directories. The new `.gitignore` excludes local dependency, state, credential, and artifact files.
+
+- RED: `node --test test/manager.test.mjs test/lifecycle.test.mjs` in task-owned `gram` Docker `node:24.22.0-bookworm`: 6 passed, 4 failed for a still-writing child after protocol error, fabricated model success, accepted auth command, and rejected model-only override.
+- Expanded RED after initial fixes: `node --test test/core.test.mjs test/manager.test.mjs test/lifecycle.test.mjs test/real-policy.test.mjs` on the same remote Docker host: 18 passed, 1 failed for a custom credential environment variable leaking in public text.
+- GREEN: the same focused command: 21 passed, 0 failed; actual Pi denied an `@`-normalized absolute write. A later `node --test test/lifecycle.test.mjs test/manager.test.mjs` GREEN: 15 passed, 0 failed, including a forced uncaught RPC listener exception while a child kept writing; cleanup stopped the writer before terminal status.
+- Full `npm test` after the first green pass: 117 passed, 0 failed; after the forced exception regression: 118 passed, 0 failed. A subsequent focused remote run covered a never-ready Pi deadline and accurate auth-source health: 17 passed, 0 failed. Final `npm test` on `gram` in Docker `node:24.22.0-bookworm`: **120 passed, 0 failed**. `git diff --check` passed locally.

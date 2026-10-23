@@ -1,0 +1,9 @@
+node_modules/
+/state/
+/artifacts/
+.env
+.env.*
+/config.json
+/pi-mcp.config.json
+/auth.json
+/models.json

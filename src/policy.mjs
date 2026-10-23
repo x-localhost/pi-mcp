@@ -4,27 +4,36 @@ import path from 'node:path';
 const readTools = new Set(['read', 'grep', 'find', 'ls']);
 const writeTools = new Set(['write', 'edit']);
 const pathKeys = ['path', 'file_path', 'filePath', 'directory', 'dir'];
+const protectedPart = part => ['.git', '.pi-mcp-policy'].includes(part.toLowerCase());
 
 export async function confinedPath(root, candidate, mayCreate = false) {
   if (typeof candidate !== 'string' || !candidate || candidate.includes('\0')) return false;
+  // Pi's path resolver strips these prefixes/whitespace after tool authorization.
+  // Reject them so validation and the eventual tool resolve the same filename.
+  if (/^[@~]|[^\S\x20\x09\x0a\x0d]|[\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]/u.test(candidate)) return false;
   const target = path.resolve(root, candidate);
   if (target !== root && !target.startsWith(root + path.sep)) return false;
   const relative = path.relative(root, target).split(path.sep);
-  if (relative.some(part => part === '.git' || part === '.pi-mcp-policy')) return false;
-  let cursor = target;
-  while (true) {
+  if (relative.some(protectedPart)) return false;
+  const canonicalRoot = await fs.realpath(root).catch(() => null);
+  if (!canonicalRoot) return false;
+  let cursor = root;
+  for (const part of relative) {
+    if (!part) continue;
+    cursor = path.join(cursor, part);
     try {
+      await fs.lstat(cursor);
       const real = await fs.realpath(cursor);
-      if (real !== root && !real.startsWith(root + path.sep)) return false;
-      const realParts = path.relative(root, real).split(path.sep);
-      return !realParts.some(part => part === '.git' || part === '.pi-mcp-policy');
+      if (real !== canonicalRoot && !real.startsWith(canonicalRoot + path.sep)) return false;
+      const realParts = path.relative(canonicalRoot, real).split(path.sep);
+      if (realParts.some(protectedPart)) return false;
     } catch (error) {
-      if (error.code !== 'ENOENT' || !mayCreate) return false;
-      const parent = path.dirname(cursor);
-      if (parent === cursor) return false;
-      cursor = parent;
+      // A dangling symlink also produces ENOENT from realpath; lstat detects it.
+      if (error.code !== 'ENOENT' || !mayCreate || await fs.lstat(cursor).then(() => true, () => false)) return false;
+      break;
     }
   }
+  return true;
 }
 
 export async function authorizeTool(policy, toolName, input = {}) {

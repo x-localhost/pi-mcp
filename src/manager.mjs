@@ -29,8 +29,8 @@ export async function git(repo, args, raw = false, env = process.env) {
 function assertId(id) { if (!idPattern.test(id)) throw new Error('Invalid job_id'); }
 function required(value, name, max) { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`Invalid ${name}`); }
 function rejectCommands(value, keyName = '') {
-  if (Array.isArray(value)) return value.forEach(rejectCommands);
-  if (typeof value === 'string' && /^!/.test(value.trim()) && /(?:apiKey|headers?|credential|token|secret)/i.test(keyName)) throw new Error('Command-bearing credential value is unsupported');
+  if (Array.isArray(value)) { for (const child of value) rejectCommands(child, keyName); return; }
+  if (typeof value === 'string' && /^!/.test(value.trim()) && /(?:apiKey|headers?|credential|token|secret|^key$|access|refresh)/i.test(keyName)) throw new Error('Command-bearing credential value is unsupported');
   if (!value || typeof value !== 'object') return;
   for (const [key, child] of Object.entries(value)) {
     if (/^(?:apiKeyCommand|command|exec|shell|credentialCommand)$/i.test(key)) throw new Error('Command-bearing models configuration is unsupported');
@@ -45,6 +45,10 @@ export class Manager {
     this.agentDir = path.join(config.stateDir, 'agent');
   }
   async init() {
+    await fs.mkdir(this.config.stateDir, { recursive: true, mode: 0o700 });
+    this.config.stateDir = await fs.realpath(this.config.stateDir);
+    this.jobsDir = path.join(this.config.stateDir, 'jobs'); this.worktreesDir = path.join(this.config.stateDir, 'worktrees');
+    this.agentDir = path.join(this.config.stateDir, 'agent');
     for (const dir of [this.config.stateDir, this.jobsDir, this.worktreesDir, this.agentDir]) {
       await fs.mkdir(dir, { recursive: true, mode: 0o700 }); await fs.chmod(dir, 0o700);
     }
@@ -124,7 +128,7 @@ export class Manager {
       if (input.request_id !== undefined) required(input.request_id, 'request_id', 100);
       const mode = parent?.mode || input.mode || 'implement';
       if (!['implement', 'review'].includes(mode) || (parent && input.mode && input.mode !== mode)) throw new Error('Invalid mode');
-      if (!parent && Boolean(input.provider) !== Boolean(input.model)) throw new Error('provider and model overrides must be supplied together');
+      if (!parent && input.provider && !input.model) throw new Error('provider override requires model');
       const provider = parent?.provider || input.provider || this.config.provider;
       const model = parent?.model || input.model || this.config.model;
       if (!provider || !model) throw new Error('provider and model must be configured or supplied');
@@ -149,11 +153,17 @@ export class Manager {
       const worktree = parent?.worktree || path.join(this.worktreesDir, id);
       const branch = parent?.branch || `codex/pi/${id.slice(5)}`;
       const dirty = !parent && !!await git(repository, ['status', '--porcelain', '--untracked-files=all'], false, this.childEnv);
-      if (parent && (!parent.sessionFile || !await fs.stat(parent.sessionFile).catch(() => null))) throw new Error('Parent session unavailable');
       if (parent) {
         const actualWorktree = await fs.realpath(parent.worktree);
         if (actualWorktree !== parent.worktree || actualWorktree !== await fs.realpath(await git(actualWorktree, ['rev-parse', '--show-toplevel'], false, this.childEnv))) throw new Error('Parent worktree changed');
         if (await git(actualWorktree, ['branch', '--show-current'], false, this.childEnv) !== parent.branch) throw new Error('Parent branch changed');
+        const sessionsRoot = await fs.realpath(path.join(this.config.stateDir, 'sessions'));
+        const sessionRoot = await fs.realpath(parent.sessionDir).catch(() => null);
+        if (!sessionRoot || sessionRoot !== parent.sessionDir || !sessionRoot.startsWith(sessionsRoot + path.sep)) throw new Error('Parent session directory changed');
+        if (parent.sessionFile) {
+          const sessionFile = await fs.realpath(parent.sessionFile).catch(() => null);
+          if (!sessionFile || !sessionFile.startsWith(sessionRoot + path.sep)) throw new Error('Parent session unavailable');
+        }
       }
       const sessionDir = parent?.sessionDir || path.join(this.config.stateDir, 'sessions', id);
       const job = { id, title: parent?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt,
@@ -214,9 +224,13 @@ export class Manager {
     const version = (await exec(this.config.piPath, [...(this.config.piArgs || []), '--version'], { env: this.childEnv, timeout: 10000 })).stdout.trim();
     if (!/\b1\.4\.0\b/.test(version)) throw new Error(`Unsupported Pi version: ${version}`);
     const which = async name => { for (const dir of (this.childEnv.PATH || '').split(path.delimiter)) if (await fs.access(path.join(dir, name), fs.constants.X_OK).then(() => true, () => false)) return true; return false; };
+    const fileExists = async file => !!file && !!await fs.stat(file).then(stat => stat.isFile(), () => false);
+    const authenticationPresent = await fileExists(path.join(this.agentDir, 'auth.json')) || await fileExists(this.config.authFile)
+      || (this.config.agentDir && await fileExists(path.join(this.config.agentDir, 'auth.json')))
+      || !!this.config.envAllowlist?.some(key => /KEY|TOKEN|AUTH|CREDENTIAL|SECRET/i.test(key) && this.childEnv[key]);
     return { version, allowedRoots: this.config.allowedRoots, stateDir: this.config.stateDir, maxConcurrent: this.config.maxConcurrent,
       activeJobs: (await this.all()).filter(job => active.has(job.status)).length,
-      authenticationPresent: !!await fs.stat(path.join(this.agentDir, 'auth.json')).catch(() => null) || !!this.config.authFile || !!this.config.envAllowlist?.some(key => /KEY|TOKEN/i.test(key) && this.childEnv[key]),
+      authenticationPresent: !!authenticationPresent,
       authenticationNote: 'Credential presence does not prove authentication.', requiredTools: { rg: await which('rg'), fd: await which('fd') } };
   }
 }

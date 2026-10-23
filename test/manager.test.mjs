@@ -44,3 +44,51 @@ test('separate managers share a submission lock and concurrency count', async ()
   assert.equal(outcomes.filter(item => item.status === 'rejected').length, 1);
   assert.match(outcomes.find(item => item.status === 'rejected').reason.message, /Concurrency limit/);
 });
+
+test('seedAgent rejects command credentials in auth key and tokens', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-auth-'));
+  const authFile = path.join(tmp, 'auth.json');
+  const manager = await new Manager({ stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], authFile }, {}).init();
+  for (const credential of [{ key: '!echo leak' }, { access: '!echo leak' }, { refresh: '!echo leak' }]) {
+    await fs.writeFile(authFile, JSON.stringify({ provider: { type: 'api_key', ...credential } }));
+    await assert.rejects(manager.seedAgent(), /Command-bearing credential/);
+  }
+});
+
+test('model-only override inherits configured provider; provider override requires model', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-model-'));
+  const repository = path.join(tmp, 'repo'); await fs.mkdir(repository);
+  const git = (...args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+  await fs.writeFile(path.join(repository, 'base.txt'), 'base'); git('add', '.'); git('commit', '-qm', 'base');
+  const manager = await new Manager({ stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], maxConcurrent: 2, defaultTimeoutSeconds: 30,
+    maxTimeoutSeconds: 60, defaultMaxTurns: 2, piPath: '/bin/true', allowedCommands: [], provider: 'configured', model: 'default' }, {}, { spawnWorker: false }).init();
+  const modelOnly = await manager.start({ repository, title: 'Model override', prompt: 'Run', model: 'alternate' });
+  assert.equal((await manager.read(modelOnly.id)).provider, 'configured');
+  assert.equal((await manager.read(modelOnly.id)).model, 'alternate');
+  await assert.rejects(manager.start({ repository, title: 'Provider override', prompt: 'Run', provider: 'other' }), /provider.*model/i);
+});
+
+test('manager canonicalizes a symlinked state directory before allocating worktrees', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-state-link-'));
+  const actual = path.join(tmp, 'actual');
+  const alias = path.join(tmp, 'alias');
+  await fs.mkdir(actual); await fs.symlink(actual, alias);
+  const manager = await new Manager({ stateDir: alias, allowedRoots: [tmp] }, {}).init();
+  assert.equal(manager.config.stateDir, actual);
+  assert.equal(manager.worktreesDir, path.join(actual, 'worktrees'));
+  assert.equal(manager.agentDir, path.join(actual, 'agent'));
+});
+
+test('health reports only existing auth sources or configured credential env', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-health-auth-'));
+  const authFile = path.join(tmp, 'missing-auth.json');
+  const config = { stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], piPath: '/bin/echo', piArgs: ['1.4.0'], authFile, envAllowlist: ['CORP_AUTH'] };
+  const manager = await new Manager(config, { PATH: process.env.PATH }).init();
+  assert.equal((await manager.health()).authenticationPresent, false);
+  await fs.writeFile(authFile, '{}');
+  assert.equal((await manager.health()).authenticationPresent, true);
+  await fs.rm(authFile);
+  manager.childEnv.CORP_AUTH = 'test-only-key';
+  assert.equal((await manager.health()).authenticationPresent, true);
+});
