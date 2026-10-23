@@ -79,12 +79,25 @@ def main():
         gateway_config = json.load(handle)
     require(config.get("model") == gateway_config.get("model") == models.get("providers", {}).get("corporate", {}).get("models", [{}])[0].get("id"), "agent and gateway model IDs differ")
     require(gateway_config.get("caFile") == "/etc/pi-internal/ca.pem", "gateway CA path mismatch")
-    header_templates = gateway_config.get("headers", {})
-    require(isinstance(header_templates, dict), "gateway headers must be an object")
+    declared = config.get("approvedMcp", {"servers": []})
+    require(isinstance(declared, dict) and set(declared) == {"servers"} and isinstance(declared["servers"], list), "approved MCP declaration invalid")
+    agent_http = {server.get("id"): server for server in declared["servers"] if isinstance(server, dict) and server.get("transport") == "internal-http"}
+    gateway_mcp = gateway_config.get("mcpServers", [])
+    require(isinstance(gateway_mcp, list) and len(gateway_mcp) <= 4, "gateway MCP declarations invalid")
+    gateway_http = {server.get("id"): server for server in gateway_mcp if isinstance(server, dict)}
+    require(len(agent_http) == len(gateway_http) == len(gateway_mcp) and set(agent_http) == set(gateway_http), "agent and gateway MCP server IDs differ")
+    for server_id, server in agent_http.items():
+        peer = gateway_http[server_id]
+        require(server.get("backendAttested") is True and peer.get("backendAttested") is True, "internal MCP backend attestation missing")
+        require(server.get("tools") == peer.get("tools"), "agent and gateway MCP tool declarations differ")
+        require(peer.get("caFile") == "/etc/pi-internal/ca.pem", "MCP gateway CA path mismatch")
+    header_maps = [gateway_config.get("headers", {})] + [server.get("headers", {}) for server in gateway_mcp]
     references = set()
-    for value in header_templates.values():
-        require(isinstance(value, str), "gateway header template must be text")
-        references.update(left or right for left, right in re.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value))
+    for header_templates in header_maps:
+        require(isinstance(header_templates, dict), "gateway headers must be an object")
+        for value in header_templates.values():
+            require(isinstance(value, str), "gateway header template must be text")
+            references.update(left or right for left, right in re.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value))
     env_path = os.environ["PI_INTERNAL_GATEWAY_ENV_FILE"]
     require(os.stat(env_path).st_mode & 0o077 == 0, "gateway env file must be owner-private")
     with open(env_path, encoding="utf-8") as handle:

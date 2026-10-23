@@ -1,9 +1,10 @@
 import fs from 'node:fs/promises';
+import { validateApprovedMcp } from '../src/approved-mcp.mjs';
 
 const PI_CLI = '/app/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js';
-const PROFILE_KEYS = new Set(['piPath', 'piArgs', 'stateDir', 'allowedRoots', 'maxConcurrent', 'defaultTimeoutSeconds', 'maxTimeoutSeconds', 'defaultMaxTurns', 'provider', 'model', 'modelsFile', 'allowedCommands', 'envAllowlist']);
+const PROFILE_KEYS = new Set(['piPath', 'piArgs', 'stateDir', 'allowedRoots', 'maxConcurrent', 'defaultTimeoutSeconds', 'maxTimeoutSeconds', 'defaultMaxTurns', 'provider', 'model', 'modelsFile', 'allowedCommands', 'envAllowlist', 'queue', 'verification', 'budgets', 'retention', 'artifacts', 'approvedMcp', 'offlineMaterials']);
 const PROVIDER_KEYS = new Set(['baseUrl', 'api', 'apiKey', 'models']);
-const MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxTokens']);
+const MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxTokens', 'input']);
 
 function object(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} must be an object`);
@@ -34,7 +35,8 @@ export function validateInternalProfile(raw) {
   boundedInt(raw.defaultMaxTurns, 1, 100, 'defaultMaxTurns');
   if (!Array.isArray(raw.allowedCommands) || raw.allowedCommands.some(x => typeof x !== 'string' || !x || x.length > 512)) throw new Error('invalid allowedCommands');
   if (JSON.stringify(raw.envAllowlist) !== '[]') throw new Error('envAllowlist must be empty');
-  return raw;
+  for (const key of ['queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials']) if (raw[key] !== undefined) object(raw[key], key);
+  return raw.approvedMcp === undefined ? raw : { ...raw, approvedMcp: validateApprovedMcp(raw.approvedMcp) };
 }
 
 export function validateInternalModels(raw, profile) {
@@ -52,6 +54,7 @@ export function validateInternalModels(raw, profile) {
   if (typeof model.name !== 'string' || !model.name || model.name.length > 128) throw new Error('invalid model name');
   boundedInt(model.contextWindow, 1024, 1000000, 'contextWindow');
   boundedInt(model.maxTokens, 1, model.contextWindow, 'maxTokens');
+  if (model.input !== undefined && JSON.stringify(model.input) !== '["text"]' && JSON.stringify(model.input) !== '["text","image"]') throw new Error('model input must be text or text plus image');
   return raw;
 }
 

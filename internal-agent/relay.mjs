@@ -7,10 +7,11 @@ export async function startRelay({ socketPath, port = 18080 }) {
   const connections = new Set();
   const upstream = new Set();
   const server = http.createServer((req, res) => {
-    if (!((req.method === 'GET' && req.url === '/healthz') || (req.method === 'POST' && req.url === ROUTE)) || req.headers.upgrade) { res.writeHead(404); res.end(); return; }
+    if (!((req.method === 'GET' && req.url === '/healthz') || (req.method === 'POST' && (req.url === ROUTE || /^\/internal-mcp\/[a-z][a-z0-9_]{0,31}$/.test(req.url ?? '')))) || req.headers.upgrade) { res.writeHead(404); res.end(); return; }
     const headers = {};
     if (req.headers['content-type'] !== undefined) headers['content-type'] = req.headers['content-type'];
     if (req.headers['content-length'] !== undefined) headers['content-length'] = req.headers['content-length'];
+    if (req.headers.accept !== undefined) headers.accept = req.headers.accept;
     const peer = http.request({ socketPath, path: req.url, method: req.method, headers, timeout: 35_000, agent: false }, response => {
       res.writeHead(response.statusCode, response.headers);
       response.on('error', () => res.destroy());

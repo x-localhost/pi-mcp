@@ -11,5 +11,6 @@
   "model": "approved-model",
   "modelsFile": "/etc/pi-internal/models.json",
   "allowedCommands": [],
-  "envAllowlist": []
+  "envAllowlist": [],
+  "approvedMcp": { "servers": [] }
 }

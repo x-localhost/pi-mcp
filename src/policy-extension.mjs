@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { Type } from '@sinclair/typebox';
 import { authorizeTool } from './policy.mjs';
+import { registerApprovedMcp } from './approved-mcp.mjs';
 
 export default function policyExtension(pi) {
   const configFile = process.env.PI_MCP_POLICY;
@@ -12,6 +13,7 @@ export default function policyExtension(pi) {
     await ready;
     await fs.appendFile(policy.denyFile, JSON.stringify({ time: new Date().toISOString(), toolName, reason }) + '\n', { mode: 0o600 });
   };
+  let approvedSession = null;
   pi.registerTool({
     name: 'safe_shell', label: 'Approved command',
     description: 'Run an administrator-approved exact command in this worktree. Commands may execute repository scripts.',
@@ -40,10 +42,13 @@ export default function policyExtension(pi) {
   pi.on('session_start', async (_event, ctx) => {
     await ready;
     if (ctx.cwd !== policy.worktree) throw new Error('Policy cwd mismatch');
-    const tools = policy.mode === 'review' ? ['read', 'grep', 'find', 'ls'] : ['read', 'grep', 'find', 'ls', 'write', 'edit', 'safe_shell'];
+    if (approvedSession) await approvedSession.close();
+    approvedSession = await registerApprovedMcp(pi, policy);
+    const tools = [...(policy.mode === 'review' ? ['read', 'grep', 'find', 'ls'] : ['read', 'grep', 'find', 'ls', 'write', 'edit', 'safe_shell']), ...approvedSession.toolNames];
     pi.setActiveTools(tools);
     const active = pi.getActiveTools();
     if (active.length !== tools.length || active.some(name => !tools.includes(name))) throw new Error('Policy tools not active');
     await fs.writeFile(policy.readyFile, JSON.stringify({ nonce: policy.nonce, pid: process.pid, tools: active }) + '\n', { mode: 0o600 });
   });
+  pi.on('session_shutdown', async () => { if (approvedSession) { await approvedSession.close(); approvedSession = null; } });
 }

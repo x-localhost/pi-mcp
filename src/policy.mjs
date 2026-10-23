@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { approvedMcpToolNames, validateToolArguments } from './approved-mcp.mjs';
 
 const readTools = new Set(['read', 'grep', 'find', 'ls']);
 const writeTools = new Set(['write', 'edit']);
@@ -39,6 +40,11 @@ export async function confinedPath(root, candidate, mayCreate = false) {
 export async function authorizeTool(policy, toolName, input = {}) {
   const deny = reason => ({ allow: false, reason });
   if (!policy || !['implement', 'review'].includes(policy.mode)) return deny('invalid policy');
+  if (typeof toolName === 'string' && toolName.startsWith('mcp__')) {
+    if (!approvedMcpToolNames(policy.approvedMcp, policy.mode).includes(toolName)) return deny('MCP tool unavailable');
+    const declaration = policy.approvedMcp?.servers?.flatMap(server => server.tools.map(tool => ({ name: `mcp__${server.id}__${tool.name}`, tool }))).find(entry => entry.name === toolName)?.tool;
+    return declaration && validateToolArguments(declaration.inputSchema, input) ? { allow: true } : deny('MCP arguments rejected');
+  }
   if (toolName === 'bash') return deny('built-in shell is disabled');
   if (toolName === 'safe_shell') {
     if (policy.mode !== 'implement') return deny('shell unavailable in review mode');

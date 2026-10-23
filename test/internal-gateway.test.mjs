@@ -170,7 +170,7 @@ test('gateway strips client headers, pins upstream and streams success with mini
     assert.equal(f.seen[0].options.headers.Authorization, 'Bearer gateway-secret');
     assert.equal(f.seen[0].options.headers['proxy-authorization'], undefined);
     assert.equal(f.seen[0].options.headers['x-forwarded-host'], undefined);
-    assert.deepEqual(JSON.parse(f.seen[0].body), body);
+    assert.deepEqual(JSON.parse(f.seen[0].body), { ...body, max_completion_tokens: 4096 });
   } finally { await f.close(); }
 });
 
