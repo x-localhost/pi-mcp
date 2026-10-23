@@ -1,0 +1,12 @@
+{
+  "providers": {
+    "corporate": {
+      "models": {
+        "corporate-model": {
+          "baseUrl": "https://llm-gateway.corp.internal/v1",
+          "apiKey": "$CORP_LLM_API_KEY"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "piPath": "/opt/pi-coding-agent/dist/bundle/cli.js",
+  "piArgs": [],
+  "stateDir": "/var/lib/pi-mcp/state",
+  "allowedRoots": ["/home/corp-user/workspace"],
+  "maxConcurrent": 2,
+  "defaultTimeoutSeconds": 1800,
+  "maxTimeoutSeconds": 7200,
+  "defaultMaxTurns": 30,
+  "provider": "corporate",
+  "model": "corporate-model",
+  "agentDir": "./agent",
+  "modelsFile": "./models.example.json",
+  "allowedCommands": ["git", "npm"],
+  "envAllowlist": ["CORP_LLM_API_KEY"],
+  "network": {
+    "httpProxyEnv": "CORP_HTTP_PROXY",
+    "httpsProxyEnv": "CORP_HTTPS_PROXY",
+    "noProxyEnv": "CORP_NO_PROXY",
+    "caFile": "./corp-ca.pem",
+    "npmRegistry": "https://npm.corp.internal/"
+  }
+}
