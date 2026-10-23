@@ -12,6 +12,8 @@ Linux Docker Engine과 [Docker Compose 2.30 이상](https://docs.docker.com/refe
 
 `internal-agent/config.example.json`, `models.example.json`, `gateway.example.json`을 각각 **개별 정규 파일**로 복사해 사내 값으로 수정하세요. 세 파일의 모델 ID는 같아야 합니다. agent 설정의 경로, 실행 파일, provider, 루프백 URL, 더미 API 키는 바꾸지 마세요. 실제 인증 헤더 값은 별도의 gateway 전용 환경 파일에만 넣습니다. 예시는 자리표시자이며 실제 서비스 주소나 비밀값을 포함하지 않습니다. CA 파일도 별도의 정규 파일로 준비합니다. 설정 디렉터리 자체를 마운트하지 않습니다.
 
+Gateway 환경 파일은 헤더가 참조하는 변수만 `KEY=VALUE` 형식으로 넣고 `chmod 600 /private/absolute/gateway.env`로 소유자만 읽고 쓸 수 있게 설정하세요. `format: raw`이므로 값에 따옴표를 덧붙이거나 `$`를 이스케이프하지 않습니다. Node 로더·프록시 등 프로세스 제어용 변수는 허용하지 않습니다.
+
 ```sh
 export PI_INTERNAL_IMAGE=pi-internal-agent:your-task-id
 export PI_INTERNAL_CONFIG_FILE=/private/absolute/config.json
@@ -50,6 +52,7 @@ python3 scripts/import-internal-agent.py \
 Git bundle 반입이 중간에 실패하면 일부만 생성된 새 `/workspace/<name>` 디렉터리가 남을 수 있습니다. 자동 덮어쓰기나 삭제를 하지 않습니다. 실패 내용을 검토하고 다른 새 이름으로 재시도하거나, 해당 격리 볼륨의 작업을 중단한 뒤 관리자가 정리하세요.
 
 - Agent는 호스트 HTTP 포트를 열지 않습니다. 읽기 전용 소켓 볼륨을 통한 gateway 연결만 허용하고 TCP/UDP/DNS, 일반 프록시, 검색 도구와 원격 미디어 URL 입력은 거절합니다. 정확한 모델 요청 형식은 gateway가 제한합니다.
+- LLM API는 OpenAI 호환 Chat Completions의 고정된 모델 하나를 지원합니다. 요청 본문은 최대 4 MiB, 메시지는 128개, 동시 요청은 8개이며, 연결 10초·유휴 30초·전체 응답 120초 제한이 있습니다. 장시간 응답이나 다른 API 형식은 별도 호환 검토가 필요합니다.
 - 저장소와 상태는 Docker **이름 있는 전용 볼륨**입니다. 이 설정은 디스크 용량 상한을 보장하지 않습니다. 운영자가 호스트 볼륨 용량을 별도로 감시해야 합니다.
 - Docker 관리자, 호스트 root, 커널 취약점, 악의적인 승인 LLM 백엔드까지 방어한다고 주장하지 않습니다. Compose 파일과 실제 `docker inspect` 검사 결과가 일치해야 합니다.
 - MCP 클라이언트와 Claude Code 자체의 클라우드 모델 통신은 Pi 컨테이너 경계 **밖**입니다. MCP 결과를 클라우드 모델에 전달하면 데이터가 그쪽으로 전송될 수 있습니다. 회사 정책에 따라 클라이언트·모델을 별도로 통제하세요.
