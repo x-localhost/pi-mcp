@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { validateApprovedMcp } from '../src/approved-mcp.mjs';
+import { validateConfig } from '../src/config.mjs';
 
 const PI_CLI = '/app/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js';
 const PROFILE_KEYS = new Set(['piPath', 'piArgs', 'stateDir', 'allowedRoots', 'maxConcurrent', 'defaultTimeoutSeconds', 'maxTimeoutSeconds', 'defaultMaxTurns', 'provider', 'model', 'modelsFile', 'allowedCommands', 'envAllowlist', 'queue', 'verification', 'budgets', 'retention', 'artifacts', 'approvedMcp', 'offlineMaterials']);
@@ -35,7 +36,10 @@ export function validateInternalProfile(raw) {
   boundedInt(raw.defaultMaxTurns, 1, 100, 'defaultMaxTurns');
   if (!Array.isArray(raw.allowedCommands) || raw.allowedCommands.some(x => typeof x !== 'string' || !x || x.length > 512)) throw new Error('invalid allowedCommands');
   if (JSON.stringify(raw.envAllowlist) !== '[]') throw new Error('envAllowlist must be empty');
-  for (const key of ['queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials']) if (raw[key] !== undefined) object(raw[key], key);
+  // Core owns the complete nested schemas. The fixed internal paths above must
+  // be checked first, then the same normalizer used by Manager rejects malformed
+  // completion sections before this profile can start Pi.
+  validateConfig(raw, '/etc/pi-internal');
   return raw.approvedMcp === undefined ? raw : { ...raw, approvedMcp: validateApprovedMcp(raw.approvedMcp) };
 }
 

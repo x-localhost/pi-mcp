@@ -21,3 +21,14 @@ test('internal profile admits normalized approved MCP only and rejects unknown f
   assert.throws(() => validateInternalProfile({ ...profile, approvedMcp: { servers: [], arbitraryRoute: 'https://outside.invalid' } }));
   assert.throws(() => validateInternalProfile({ ...profile, unsupported: true }));
 });
+
+test('internal profile rejects malformed nested completion sections', () => {
+  for (const invalid of [
+    { queue: { maxPending: 0 } },
+    { verification: { commands: [{ id: 'broken', argv: 'shell string' }] } },
+    { budgets: { maxInputTokens: -1 } },
+    { retention: { terminalDays: -1 } },
+    { artifacts: { unknown: true } },
+    { offlineMaterials: { unknown: true } },
+  ]) assert.throws(() => validateInternalProfile({ ...profile, ...invalid }));
+});

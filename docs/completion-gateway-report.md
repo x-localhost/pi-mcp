@@ -1,5 +1,7 @@
 # Completion gateway unit report — 2026-10-24
 
+Administrator configuration examples and protocol limits: [approved-mcp.md](approved-mcp.md).
+
 Worktree: `/Users/leebw/workspace/claude/pi-mcp-worktrees/completion-gateway`; branch `codex/completion/gateway`; base `5ce1c5dac06aa24118b1707bf8f14dd9cd9643d5`. Parent owns commits and integration. All executable checks used task-isolated files under `/tmp/pi-mcp-completion-20261024/gateway` on gram and `pi-mcp-completion:base-20261024` with Docker `--network none`; no paid or company endpoint was contacted.
 
 ## Files changed
@@ -24,7 +26,7 @@ The internal HTTP bridge supports only stateless JSON Streamable HTTP for `initi
 
 Stdio permits only root-owned, non-group/world-writable executables and scripts beneath `/app/approved-mcp`, with root-owned immutable ancestor paths; Node may be `/usr/local/bin/node` with one packaged script argument. The child receives minimal explicit environment plus `MCP_` variables, not Pi/model credentials. Tool schemas are a bounded, reference-free JSON Schema subset, maximum 16 KiB each, arguments 16 KiB, results 32 KiB, HTTP frames 64 KiB, 4 servers, 16 tools/server, 2 active calls/server, 10-second MCP call deadline. Gateway chat body remains 4 MiB, upstream total deadline 120 seconds, concurrent requests 16. Gateway diagnostics contain only generated request ID, category, HTTP status, elapsed milliseconds, and completed/aborted flags, at most 256 records. A partial 200 stream is recorded with its failure category and `aborted:true`; the status records what the client saw, not success. No prompt, response body, upstream header, credential or environment value is recorded.
 
-Profile currently checks the new `queue`, `verification`, `budgets`, `retention`, `artifacts`, and `offlineMaterials` entries are objects; final nested validation belongs to core's configuration normalizers at integration. Do not treat the profile object check alone as final validation.
+Follow-up profile integration invokes core `validateConfig(raw, '/etc/pi-internal')` after its fixed-path restrictions, so the new `queue`, `verification`, `budgets`, `retention`, `artifacts`, and `offlineMaterials` sections receive the same nested validation as Manager. Its GREEN profile run passed after the committed validator dependency was supplied.
 
 ## RED and GREEN evidence
 
@@ -50,3 +52,11 @@ timeout 60s docker run --rm --network none --user 0:0 \
 ```
 
 Observed before follow-up: Python compile passed; node:test **30 tests, 30 pass, 0 fail**. The real Pi fixture took 1.2 seconds and confirmed the mock model saw the approved tool declaration and the MCP result. Follow-up affected gateway suites: **20 tests, 20 pass, 0 fail**. Full listed suite rerun after the follow-up: **32 tests, 32 pass, 0 fail**. No local build, install, suite, service or test ran.
+
+## Post-commit integration follow-up (uncommitted)
+
+After parent committed the gateway unit at `a254cfc`, this checkout was clean. This follow-up changed `README.md`, `docs/parity.md`, `docs/operations.md`, `internal-agent/profile.mjs`, `scripts/test-internal-agent.py`, `test/completion-profile.test.mjs`, this report, and added `docs/approved-mcp.md` and `test/approved-mcp-docs.test.mjs`. The guide has complete agent/gateway pairs for fixed private HTTP MCP and packaged stdio MCP, along with review policy, bounds, diagnostics and backend egress caveat. The user-facing docs now link the artifact/offline and forthcoming runtime guides, state Linux `/usr/bin/flock` and visible `/proc` requirements, and require stopping old workers before changing lock implementations.
+
+The profile now calls core `validateConfig(raw, '/etc/pi-internal')` after checking the fixed internal paths and values. Focused RED on gram before the change: `node --test test/completion-profile.test.mjs` gave **2 pass, 1 fail** because a malformed `queue.maxPending` was accepted. Against the old committed core config, the profile hook gave **2 pass, 1 fail**: the existing valid `approvedMcp` case failed with `config: unknown field "approvedMcp"`. Parent supplied committed artifact/config dependencies `a6e7f50` and `0d31fbb`; profile and documentation tests then passed **4/4**.
+
+The Python `wait_job` probe on gram used a fake sequence `queued → verifying → finalizing → completed`. It failed before updating the active-state set and printed `wait_job active states: passed` afterward; remote `python3 -m py_compile` passed. The documentation pair test ran in a disposable network-none Docker container on gram, validating both JSON pairs against the internal profile, MCP and gateway validators (with a task-local disposable CA file). The final relevant regression command was `node --test --test-concurrency=1 test/completion-profile.test.mjs test/approved-mcp-docs.test.mjs test/config.test.mjs test/completion-gateway.test.mjs test/internal-gateway.test.mjs` in that container: **116 tests, 116 pass, 0 fail**. The focused documentation/profile rerun after strengthening the pair assertion was **4/4**. No local build or suite ran.

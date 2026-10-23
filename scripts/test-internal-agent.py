@@ -74,7 +74,7 @@ def wait_job(client, job_id):
     deadline = time.monotonic() + 75
     while time.monotonic() < deadline:
         status = client.tool("pi_status", {"job_id": job_id})
-        if status["status"] not in ("starting", "running"):
+        if status["status"] not in ("queued", "starting", "running", "verifying", "finalizing"):
             return status["status"]
         time.sleep(0.5)
     raise TimeoutError("Pi job did not settle")
