@@ -21,6 +21,9 @@
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
+import { validateArtifactConfig } from './artifacts.mjs';
+import { validateOfflineConfig } from './offline-materials.mjs';
+import { validateApprovedMcp } from './approved-mcp.mjs';
 
 const REDACTED = '[REDACTED]';
 
@@ -44,7 +47,60 @@ const TOP_LEVEL_FIELDS = [
   'allowedCommands',
   'envAllowlist',
   'network',
+  'queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials', 'approvedMcp',
 ];
+
+function strictObject(raw, allowed, label) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail(label, 'must be an object');
+  for (const key of Object.keys(raw)) if (!allowed.includes(key)) fail(label, `unknown field "${key}"`);
+}
+function bounded(raw, name, fallback, min, max, label) {
+  const value = raw[name] === undefined ? fallback : raw[name];
+  if (!Number.isSafeInteger(value) || value < min || value > max) fail(`${label}.${name}`, `must be an integer between ${min} and ${max}`);
+  return value;
+}
+function normalizeQueue(raw = {}) {
+  strictObject(raw, ['maxPending', 'maxWaitSeconds', 'dispatchIntervalMs'], 'queue');
+  return { maxPending: bounded(raw, 'maxPending', 16, 1, 64, 'queue'), maxWaitSeconds: bounded(raw, 'maxWaitSeconds', 3600, 10, 86400, 'queue'), dispatchIntervalMs: bounded(raw, 'dispatchIntervalMs', 500, 100, 5000, 'queue') };
+}
+function normalizeVerification(raw = {}) {
+  strictObject(raw, ['commands', 'maxSelected'], 'verification');
+  const commands = raw.commands === undefined ? [] : raw.commands;
+  if (!Array.isArray(commands) || commands.length > 32) fail('verification.commands', 'invalid command list');
+  const ids = new Set();
+  const normalized = commands.map(item => {
+    strictObject(item, ['id', 'argv', 'timeoutSeconds', 'maxOutputBytes', 'readOnly'], 'verification.commands');
+    if (!/^[a-z][a-z0-9_-]{0,47}$/.test(item.id || '') || ids.has(item.id)) fail('verification.commands', 'invalid or duplicate command id');
+    ids.add(item.id);
+    if (!Array.isArray(item.argv) || item.argv.length < 1 || item.argv.length > 16 || item.argv.some(value => typeof value !== 'string' || !value || value.length > 512 || /[\0\r\n]/.test(value)) || !path.isAbsolute(item.argv[0]) || path.normalize(item.argv[0]) !== item.argv[0] || item.argv[0].split('/').some(part => part === '.' || part === '..') || !['/usr/bin', '/bin', '/usr/local/bin', '/opt/project-tools'].some(root => item.argv[0].startsWith(root + '/'))) fail('verification.commands', 'argv must pin an image-packaged absolute executable and bounded arguments');
+    if (item.readOnly !== undefined && typeof item.readOnly !== 'boolean') fail('verification.commands.readOnly', 'must be boolean');
+    return { id: item.id, argv: [...item.argv], timeoutSeconds: bounded(item, 'timeoutSeconds', 300, 1, 3600, 'verification.commands'), maxOutputBytes: bounded(item, 'maxOutputBytes', 65536, 1, 1048576, 'verification.commands'), readOnly: item.readOnly === true };
+  });
+  return { commands: normalized, maxSelected: bounded(raw, 'maxSelected', 4, 1, 8, 'verification') };
+}
+function normalizeBudgets(raw = {}) {
+  strictObject(raw, ['maxInputTokens', 'maxOutputTokens', 'maxTotalTokens', 'maxCostUsd'], 'budgets');
+  const result = {};
+  for (const key of ['maxInputTokens', 'maxOutputTokens', 'maxTotalTokens']) if (raw[key] !== undefined) result[key] = bounded(raw, key, null, 1, 10000000, 'budgets');
+  if (raw.maxCostUsd !== undefined) {
+    if (typeof raw.maxCostUsd !== 'number' || !Number.isFinite(raw.maxCostUsd) || raw.maxCostUsd <= 0 || raw.maxCostUsd > 10000) fail('budgets.maxCostUsd', 'invalid bound');
+    result.maxCostUsd = raw.maxCostUsd;
+  }
+  return result;
+}
+function normalizeRetention(raw = {}) {
+  strictObject(raw, ['maxStateBytes', 'maxScanEntries', 'terminalDays'], 'retention');
+  return { maxStateBytes: bounded(raw, 'maxStateBytes', 4 * 1024 * 1024 * 1024, 1048576, 1024 * 1024 * 1024 * 1024, 'retention'),
+    maxScanEntries: bounded(raw, 'maxScanEntries', 100000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
+}
+export function validateCompletionSections(raw = {}, configDir = '/') {
+  strictObject(raw, TOP_LEVEL_FIELDS, 'completion');
+  const section = (name) => raw[name] === undefined ? {} : raw[name];
+  return { queue: normalizeQueue(section('queue')), verification: normalizeVerification(section('verification')),
+    budgets: normalizeBudgets(section('budgets')), retention: normalizeRetention(section('retention')),
+    artifacts: validateArtifactConfig(section('artifacts')), offlineMaterials: validateOfflineConfig(section('offlineMaterials'), configDir),
+    approvedMcp: validateApprovedMcp(raw.approvedMcp) };
+}
 
 // Names that must never be reachable through the generic envAllowlist,
 // because they are either managed exclusively by the dedicated network.*
@@ -246,6 +302,7 @@ export function validateConfig(raw, configDir) {
   const authFile = normalizeOptionalPath(raw, 'authFile', configDir);
 
   const network = normalizeNetwork(raw.network, configDir);
+  const { queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp } = validateCompletionSections(raw, configDir);
 
   return {
     piPath,
@@ -265,6 +322,7 @@ export function validateConfig(raw, configDir) {
     allowedCommands,
     envAllowlist,
     network,
+    queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp,
   };
 }
 
@@ -437,5 +495,7 @@ export async function loadConfig(file = process.env.PI_MCP_CONFIG) {
     throw new Error(`loadConfig: failed to read or parse "${resolved}" (${err.code || err.name || 'error'})`);
   }
 
-  return validateConfig(raw, path.dirname(resolved));
+  const config = validateConfig(raw, path.dirname(resolved));
+  Object.defineProperty(config, 'configFile', { value: resolved, enumerable: false });
+  return config;
 }
