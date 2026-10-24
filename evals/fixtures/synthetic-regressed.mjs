@@ -10,7 +10,7 @@ import { buildBaselineTraces } from './synthetic-baseline.mjs';
 export async function buildRegressedTraces() {
   const baseline = await buildBaselineTraces();
   return baseline.map(trace => trace.taskId === 'fix-null-check'
-    ? { ...trace, runId: 'synthetic-regressed', artifacts: { changedPaths: [], unchangedPaths: trace.artifacts.unchangedPaths } }
+    ? { ...trace, runId: 'synthetic-regressed', artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: trace.artifacts.unchangedPaths } }
     : { ...trace, runId: 'synthetic-regressed' });
 }
 

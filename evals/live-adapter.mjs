@@ -102,8 +102,11 @@ export async function submitLiveRun({ manager, stateDir, runId, suiteDigest, sel
   const submissions = selectedTaskIds.map(id => payload(selected.find(item => item.id === id), repository, baseCommit, effectiveProvider, effectiveModel, requestId(runId, id)));
   const identity = sha256Hex({ suiteDigest, harnessCommit, selectedTaskIds: [...selectedTaskIds].sort(),
     taskContent: selected.map(item => [item.id, taskContentDigest(item)]).sort(), submissions, repository, baseCommit, fingerprint });
-  await privateDir(stateDir);
-  const file = path.join(stateDir, sha256Hex(runId) + '.json');
+  // The caller's output location cannot select a new registry for the same Manager.
+  if (stateDir !== undefined && (typeof stateDir !== 'string' || !path.isAbsolute(stateDir))) throw new Error('Absolute stateDir required');
+  const registry = path.join(manager.config.stateDir, 'evaluation-runs');
+  await privateDir(registry);
+  const file = path.join(registry, sha256Hex(runId) + '.json');
   return withOwnershipLock(file + '.lock', async () => {
     const existing = await readRecord(file);
     if (existing && (existing.runId !== runId || existing.identity !== identity)) throw new ProvenanceError('Run identity changed');
@@ -119,20 +122,21 @@ export async function submitLiveRun({ manager, stateDir, runId, suiteDigest, sel
     return { runId, taskId: task.id, jobId: started.id, requestId: rid, status: started.status, origin: 'live', configFingerprint: fingerprint };
   }, { timeoutSeconds: 10 });
 }
-async function changedPaths(manager, id, digest) {
+async function changedEvidence(manager, id, digest) {
   let cursor = null, pages = 0;
-  const paths = [];
+  const paths = [], filePaths = [];
   do {
     const page = await manager.artifacts(id, { cursor, limit: 100 });
     if (!page.checkpointComplete || page.inputSnapshotDigest !== digest || page.truncated || page.omissionsTruncated) return null;
     for (const entry of page.entries) if (entry.type === 'file' || entry.type === 'delete') {
       if (entry.redacted || entry.complete !== true || entry.applicable !== true || typeof entry.path !== 'string') return null;
       paths.push(entry.path);
+      if (entry.type === 'file') filePaths.push(entry.path);
     }
     cursor = page.nextCursor;
     if (++pages > 42 || paths.length > 4096) return null;
   } while (cursor !== null);
-  return [...new Set(paths)];
+  return { changedPaths: [...new Set(paths)], filePaths: [...new Set(filePaths)] };
 }
 async function resumeEvidence(manager, jobId, required, active) {
   if (typeof manager.events !== 'function') return { resumeEvents: [], eventsTruncated: required || active };
@@ -159,7 +163,12 @@ async function makeTrace(manager, current, { jobId, task, submission, runId, har
     throw new ProvenanceError('Manager job does not match submitted task contract or provenance');
   const digest = current.artifacts?.checkpointComplete && HEX64.test(current.artifacts?.inputSnapshotDigest || '') ? current.artifacts.inputSnapshotDigest : null;
   const status = digest && !ACTIVE.has(current.status) ? current.status === 'completed' && current.execution?.status === 'passed' ? 'completed' : 'failed' : 'incomplete';
-  const changed = digest && !ACTIVE.has(current.status) ? await changedPaths(manager, jobId, digest) : null;
+  const evidence = digest && !ACTIVE.has(current.status) ? await changedEvidence(manager, jobId, digest) : null;
+  const changed = evidence?.changedPaths ?? null;
+  let present = evidence ? [] : null;
+  if (present) for (const rel of task.expectedEvidence.changedPaths) {
+    if (evidence.filePaths.includes(rel) && await manager.sourcePathExists(raw, rel)) present.push(rel);
+  }
   let unchanged = changed === null ? null : [];
   if (unchanged) for (const { path: rel } of task.expectedEvidence.constraintEvidence) {
     if (changed.includes(rel)) continue;
@@ -187,7 +196,7 @@ async function makeTrace(manager, current, { jobId, task, submission, runId, har
   return parseTrace({ taskId: task.id, runId, origin: 'live', harnessCommit, taskBaseCommit,
     configFingerprint: submission.configFingerprint,
     execution: { jobId, status, codeDigest: status === 'incomplete' ? null : digest },
-    artifacts: { changedPaths: changed, unchangedPaths: unchanged }, verification, review, retainedConstraintIds: retained,
+    artifacts: { changedPaths: changed, unchangedPaths: unchanged, presentPaths: present }, verification, review, retainedConstraintIds: retained,
     ...resume,
     timing: Number.isFinite(started) && Number.isFinite(finished) && finished >= started && finished - started <= 86400000 ? { durationMs: finished - started } : null,
     usageAvailability: { totalTokens: tokens === null ? 'unavailable' : 'available', costUsd: cost === null ? 'unavailable' : 'available' },

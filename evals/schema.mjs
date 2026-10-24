@@ -158,11 +158,13 @@ function parseExecution(raw) {
 
 function parseArtifacts(raw) {
   requireObject(raw, 'trace.artifacts');
-  allowKeys(raw, 'trace.artifacts', ['changedPaths', 'unchangedPaths']);
+  allowKeys(raw, 'trace.artifacts', ['changedPaths', 'unchangedPaths', 'presentPaths']);
   const changedPaths = raw.changedPaths === null ? null : requireUniqueStringArray(raw.changedPaths, 'trace.artifacts.changedPaths', { max: MAX_PATHS });
   const unchangedPaths = raw.unchangedPaths === null ? null : requireUniqueStringArray(raw.unchangedPaths, 'trace.artifacts.unchangedPaths', { max: MAX_PATHS });
+  const presentPaths = raw.presentPaths == null ? null : requireUniqueStringArray(raw.presentPaths, 'trace.artifacts.presentPaths', { max: MAX_PATHS });
   if (changedPaths && unchangedPaths && changedPaths.some(item => unchangedPaths.includes(item))) fail('Contradictory changed/unchanged path evidence');
-  return { changedPaths, unchangedPaths };
+  if (presentPaths && (!changedPaths || presentPaths.some(item => !changedPaths.includes(item)))) fail('Present paths require matching changed paths');
+  return { changedPaths, unchangedPaths, presentPaths };
 }
 
 function parseVerification(raw) {

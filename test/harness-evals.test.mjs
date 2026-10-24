@@ -102,7 +102,7 @@ function baseTrace(task, overrides = {}) {
     taskBaseCommit: TASK_BASE_COMMIT,
     configFingerprint: CONFIG_FINGERPRINT,
     execution: { jobId: 'job-1', status: 'completed', codeDigest: FRESH_DIGEST },
-    artifacts: { changedPaths: ['src/parser.mjs'], unchangedPaths: ['src/parser-api.mjs'] },
+    artifacts: { changedPaths: ['src/parser.mjs'], presentPaths: ['src/parser.mjs'], unchangedPaths: ['src/parser-api.mjs'] },
     verification: { jobId: 'job-1', codeDigest: FRESH_DIGEST, contractDigest: taskContractDigest(task), verifierIds: ['lint'], status: 'passed' },
     review: null,
     retainedConstraintIds: ['preserve-public-api'],
@@ -121,7 +121,7 @@ test('parseTask rejects a malformed id distinctly from a graded negative outcome
   assert.throws(() => parseTask({ id: 'Not Valid ID', scenario: 'successful_completion', prompt: 'x',
     criteria: [], expectedEvidence: { changedPaths: [], requiredVerifierIds: [], requiresReview: false, requiresResume: false, requiredConstraintIds: [], constraintEvidence: [] } }), SchemaError);
   const task = baseTask();
-  assert.doesNotThrow(() => gradeTask(task, baseTrace(task, { artifacts: { changedPaths: [], unchangedPaths: ['src/parser-api.mjs'] } })));
+  assert.doesNotThrow(() => gradeTask(task, baseTrace(task, { artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: ['src/parser-api.mjs'] } })));
 });
 
 test('parseTask rejects conflicting constraint identities: a dangling required ID or an orphan evidence entry', () => {
@@ -198,7 +198,7 @@ test('gradeTask: successful completion passes when evidence is bound to this exa
 
 test('gradeTask: false completion is a graded failure, not a thrown error, despite status "completed" and verification "passed"', () => {
   const task = baseTask();
-  const trace = baseTrace(task, { artifacts: { changedPaths: [], unchangedPaths: ['src/parser-api.mjs'] } });
+  const trace = baseTrace(task, { artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: ['src/parser-api.mjs'] } });
   const result = gradeTask(task, trace);
   assert.equal(result.taskSuccess, false);
   assert.ok(result.criteria.some(c => c.id === 'artifact' && c.outcome === 'fail'));
@@ -206,7 +206,7 @@ test('gradeTask: false completion is a graded failure, not a thrown error, despi
 
 test('gradeTask: declaring a retained-constraint ID alone never passes retention without independent evidence', () => {
   const task = baseTask();
-  const trace = baseTrace(task, { artifacts: { changedPaths: ['src/parser.mjs'], unchangedPaths: [] } });
+  const trace = baseTrace(task, { artifacts: { changedPaths: ['src/parser.mjs'], presentPaths: ['src/parser.mjs'], unchangedPaths: [] } });
   const result = gradeTask(task, trace);
   assert.equal(result.constraintRetention, 'lost');
 });
@@ -259,20 +259,22 @@ test('gradeTask: stale review evidence fails the same way as stale verification,
   assert.equal(result.taskSuccess, false);
 });
 
-test('gradeTask: partial/incomplete execution reports criteria as unknown, not a false pass or a thrown error', () => {
+test('gradeTask: partial execution keeps completion unknown and independently grades file preservation', () => {
   const task = baseTask();
   const trace = baseTrace(task, { execution: { jobId: 'job-1', status: 'incomplete', codeDigest: null }, verification: null });
   const result = gradeTask(task, trace);
   assert.equal(result.taskSuccess, false);
-  assert.ok(result.criteria.every(c => c.outcome === 'unknown'));
+  assert.ok(result.criteria.filter(c => c.kind !== 'constraint').every(c => c.outcome === 'unknown'));
+  assert.equal(result.constraintRetention, 'retained');
 });
 
-test('gradeTask: a failed execution reports criteria as fail, not unknown', () => {
+test('gradeTask: failed execution fails completion while preserving observed unchanged file evidence', () => {
   const task = baseTask();
   const trace = baseTrace(task, { execution: { jobId: 'job-1', status: 'failed', codeDigest: FRESH_DIGEST }, verification: null });
   const result = gradeTask(task, trace);
   assert.equal(result.taskSuccess, false);
-  assert.ok(result.criteria.every(c => c.outcome === 'fail'));
+  assert.ok(result.criteria.filter(c => c.kind !== 'constraint').every(c => c.outcome === 'fail'));
+  assert.equal(result.constraintRetention, 'retained');
 });
 
 test('gradeTask: duplicate resume request mapped to two different jobs is a graded failure', () => {
@@ -424,7 +426,7 @@ test('compareReports refuses mismatched task selection by default, names the gap
 test('compareReports computes latency/cost deltas only from matched observed cases and reports success differences', () => {
   const task = baseTask();
   const baselineTrace = baseTrace(task, { timing: { durationMs: 1000 } });
-  const candidateTrace = baseTrace(task, { timing: null, artifacts: { changedPaths: [], unchangedPaths: ['src/parser-api.mjs'] } }); // regressed: now fails, and latency unobserved
+  const candidateTrace = baseTrace(task, { timing: null, artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: ['src/parser-api.mjs'] } }); // regressed: now fails, and latency unobserved
   const baseline = makeReport(task, [baselineTrace]);
   const candidate = makeReport(task, [candidateTrace]);
   const comparison = compareReports(baseline, candidate);
@@ -522,7 +524,7 @@ test('submitLiveRun refuses to contact the Manager at all without explicit live 
   await assert.rejects(submitLiveRun(base), /acknowledge|live/i);
   const jobs = await fs.readdir(manager.jobsDir).catch(() => []);
   assert.equal(jobs.length, 0, 'no job should be created before explicit live acknowledgement');
-  const stateFiles = await fs.readdir(stateDir).catch(() => []);
+  const stateFiles = await fs.readdir(path.join(manager.config.stateDir, 'evaluation-runs')).catch(() => []);
   assert.equal(stateFiles.length, 0, 'no run state should be written before explicit live acknowledgement');
 });
 
@@ -544,8 +546,8 @@ test('submitLiveRun reconciles a lost submit response using the stable request i
   const first = await submitLiveRun(base);
   // Simulate a crash after the Manager created the job but before the
   // adapter's own record of its id was durably updated.
-  const recordFile = (await fs.readdir(stateDir)).find(name => name.endsWith('.json'));
-  const recordPath = path.join(stateDir, recordFile);
+  const recordFile = (await fs.readdir(path.join(manager.config.stateDir, 'evaluation-runs'))).find(name => name.endsWith('.json'));
+  const recordPath = path.join(manager.config.stateDir, 'evaluation-runs', recordFile);
   const record = JSON.parse(await fs.readFile(recordPath, 'utf8'));
   record.tasks[task.id].jobId = null;
   await fs.writeFile(recordPath, JSON.stringify(record));

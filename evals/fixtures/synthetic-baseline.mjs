@@ -22,7 +22,7 @@ function base(taskId, overrides) {
     taskId, runId: RUN_ID, origin: 'synthetic',
     harnessCommit: HARNESS_COMMIT, taskBaseCommit: TASK_BASE_COMMIT, configFingerprint: CONFIG_FINGERPRINT,
     execution: { jobId: `job-${taskId}`, status: 'completed', codeDigest: hex('a') },
-    artifacts: { changedPaths: [], unchangedPaths: [] },
+    artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: [] },
     verification: null,
     review: null,
     retainedConstraintIds: [],
@@ -49,7 +49,7 @@ export async function buildBaselineTraces() {
       const codeDigest = hex('a');
       return {
         execution: { jobId: 'job-fix-null-check', status: 'completed', codeDigest },
-        artifacts: { changedPaths: ['src/parser.mjs'], unchangedPaths: ['src/parser-api.mjs'] },
+        artifacts: { changedPaths: ['src/parser.mjs'], presentPaths: ['src/parser.mjs'], unchangedPaths: ['src/parser-api.mjs'] },
         verification: freshVerification(task, { codeDigest, verifierIds: ['lint'] }),
         retainedConstraintIds: ['preserve-public-api'],
       };
@@ -62,7 +62,7 @@ export async function buildBaselineTraces() {
       const codeDigest = hex('b');
       return {
         execution: { jobId: 'job-false-claim-complete', status: 'completed', codeDigest },
-        artifacts: { changedPaths: [], unchangedPaths: [] },
+        artifacts: { changedPaths: [], presentPaths: [], unchangedPaths: [] },
         verification: freshVerification(task, { codeDigest, verifierIds: ['lint'] }),
       };
     })()),
@@ -74,7 +74,7 @@ export async function buildBaselineTraces() {
       const codeDigest = hex('c');
       return {
         execution: { jobId: 'job-preserve-auth-contract', status: 'completed', codeDigest },
-        artifacts: { changedPaths: ['src/session-store.mjs'], unchangedPaths: [] },
+        artifacts: { changedPaths: ['src/session-store.mjs'], presentPaths: ['src/session-store.mjs'], unchangedPaths: [] },
         verification: freshVerification(task, { codeDigest, verifierIds: ['unit'] }),
         retainedConstraintIds: ['preserve-auth-contract'],
       };
@@ -83,7 +83,7 @@ export async function buildBaselineTraces() {
     // duplicate_resume: one request_id mapped to two different job ids.
     base('resume-after-timeout', {
       execution: { jobId: 'job-resume-after-timeout', status: 'completed', codeDigest: hex('d') },
-      artifacts: { changedPaths: ['src/migration.mjs'], unchangedPaths: [] },
+      artifacts: { changedPaths: ['src/migration.mjs'], presentPaths: ['src/migration.mjs'], unchangedPaths: [] },
       resumeEvents: [
         { eventId: 'e1', requestId: 'r1', jobId: 'job-a' },
         { eventId: 'e2', requestId: 'r1', jobId: 'job-b' },
@@ -94,7 +94,7 @@ export async function buildBaselineTraces() {
     // -- valid idempotency evidence, not a failure.
     base('retry-flaky-build', {
       execution: { jobId: 'job-retry-flaky-build', status: 'completed', codeDigest: hex('e') },
-      artifacts: { changedPaths: ['src/build.mjs'], unchangedPaths: [] },
+      artifacts: { changedPaths: ['src/build.mjs'], presentPaths: ['src/build.mjs'], unchangedPaths: [] },
       resumeEvents: [
         { eventId: 'e1', requestId: 'r1', jobId: 'job-x' },
         { eventId: 'e2', requestId: 'r1', jobId: 'job-x' },
@@ -106,7 +106,7 @@ export async function buildBaselineTraces() {
       const task = byId('lint-clean-formatter');
       return {
         execution: { jobId: 'job-lint-clean-formatter', status: 'completed', codeDigest: hex('f') },
-        artifacts: { changedPaths: ['src/formatter.mjs'], unchangedPaths: [] },
+        artifacts: { changedPaths: ['src/formatter.mjs'], presentPaths: ['src/formatter.mjs'], unchangedPaths: [] },
         verification: freshVerification(task, { codeDigest: hex('0'), verifierIds: ['lint'] }),
       };
     })()),
@@ -118,7 +118,7 @@ export async function buildBaselineTraces() {
       const codeDigest = hex('1');
       return {
         execution: { jobId: 'job-review-rate-limiter', status: 'completed', codeDigest },
-        artifacts: { changedPaths: ['src/rate-limiter.mjs'], unchangedPaths: [] },
+        artifacts: { changedPaths: ['src/rate-limiter.mjs'], presentPaths: ['src/rate-limiter.mjs'], unchangedPaths: [] },
         verification: freshVerification(task, { codeDigest, verifierIds: ['unit'] }),
         review: { jobId: 'job-review-rate-limiter', reviewJobId: 'job-review-rate-limiter-review', codeDigest: hex('9'), contractDigest: taskContractDigest(task), verdict: 'approved' },
       };
@@ -135,7 +135,7 @@ export async function buildBaselineTraces() {
       const codeDigest = hex('2');
       return {
         execution: { jobId: 'job-long-running-batch-job', status: 'completed', codeDigest },
-        artifacts: { changedPaths: ['src/batch-job.mjs'], unchangedPaths: [] },
+        artifacts: { changedPaths: ['src/batch-job.mjs'], presentPaths: ['src/batch-job.mjs'], unchangedPaths: [] },
         verification: freshVerification(task, { codeDigest, verifierIds: ['lint'] }),
         timing: null,
         usageAvailability: { totalTokens: 'unavailable', costUsd: 'unavailable' },
@@ -147,7 +147,7 @@ export async function buildBaselineTraces() {
     // explicitly flagged as truncated -- correctness is unknown, not assumed.
     base('resume-across-session-gap', {
       execution: { jobId: 'job-resume-across-session-gap', status: 'completed', codeDigest: hex('4') },
-      artifacts: { changedPaths: ['src/deploy.mjs'], unchangedPaths: [] },
+      artifacts: { changedPaths: ['src/deploy.mjs'], presentPaths: ['src/deploy.mjs'], unchangedPaths: [] },
       resumeEvents: [],
       eventsTruncated: true,
     }),

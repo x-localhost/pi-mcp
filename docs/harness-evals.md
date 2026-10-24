@@ -23,6 +23,15 @@ correctness means observed submission request-to-job idempotency, not agent
 session semantic preservation. Usage requires measured available dimensions
 and an observed response count.
 
+Changed-path evidence includes deletions, so it can still show that a file was
+not preserved. A required output also needs separate `artifacts.presentPaths`
+evidence from the immutable code checkpoint; a deleted, absent, or unknown
+required file never passes. File preservation is reported independently of
+execution success: a failed execution may still have a proven retained file.
+Reports derive success, applicability, categorical counts, and measured means
+from their per-task rows. This enforces internal consistency, not the
+authenticity of a self-consistent report supplied by a caller.
+
 The synthetic baseline, regressed, and incomplete fixtures are executable.
 The incomplete fixture records an observed execution without a code digest;
 a missing selected-task outcome is separate.
@@ -72,6 +81,9 @@ does not hash mutable external models, auth or agent file contents; pin
 those files separately if they can change between runs. Run identity also
 covers the committed evaluation checkout SHA, complete task content and exact submission payload. Changing these
 under one run ID rejects before Manager submission.
+The evaluation source checkout must be clean for executable paths (`src/`,
+`internal-agent/`, `evals/`, `scripts/`, and package manifests) before live
+Manager initialization, so the reported harness SHA describes the code run.
 
 The live output is a constructed `version:1` bundle with bounded
 replayable traces and a report. `--out` writes a 0600 exclusive file;
@@ -81,6 +93,11 @@ artifact and caller review evidence. It never auto-attests, approves,
 commits or deploys. A crash-stale run lock is recovered with Linux ownership
 locking; state is private, bounded, no-follow and atomically written. Manager
 request-ID tombstones remain authoritative after cleanup.
+`--state-dir` remains accepted for CLI compatibility but does not select the
+identity registry. Every run ID is recorded under the configured Manager
+`stateDir/evaluation-runs`, so a different caller path cannot evade identity
+checks. Live and offline CLI errors have bounded, generic diagnostics and do
+not echo rejected input values.
 
 The current Manager event API does not expose complete request-to-job
 submission mappings. Live required-resume evidence therefore stays unknown;

@@ -24,7 +24,7 @@ const task = () => parseTask({ id: 'evaluate-fix', scenario: 'successful_complet
     requiredConstraintIds: ['preserve-base'], constraintEvidence: [{ constraintId: 'preserve-base', path: 'base.txt' }] } });
 const trace = (item, overrides = {}) => parseTrace({ taskId: item.id, runId: 'run-one', origin: 'synthetic', harnessCommit: sha,
   taskBaseCommit: sha, configFingerprint: fp, execution: { jobId: 'job-one', status: 'completed', codeDigest: code },
-  artifacts: { changedPaths: ['target.txt'], unchangedPaths: ['base.txt'] },
+  artifacts: { changedPaths: ['target.txt'], presentPaths: ['target.txt'], unchangedPaths: ['base.txt'] },
   verification: { jobId: 'job-one', codeDigest: code, contractDigest: taskContractDigest(item), verifierIds: ['unit'], status: 'passed' },
   review: null, retainedConstraintIds: ['preserve-base'], resumeEvents: [], eventsTruncated: false,
   timing: { durationMs: 100 }, usageAvailability: { totalTokens: 'available', costUsd: 'available' },
@@ -37,13 +37,13 @@ test('runtime acceptance digest binds verification and malformed predicates reje
   assert.equal(taskContractDigest(item), contractDigest(runtime));
   assert.throws(() => parseTask({ ...item, criteria: [{ id: 'x', kind: 'invented', description: 'No' }] }));
   assert.throws(() => parseTask({ ...item, criteria: [...item.criteria, item.criteria[0]] }));
-  assert.throws(() => trace(item, { artifacts: { changedPaths: ['target.txt'], unchangedPaths: ['target.txt'] } }));
+  assert.throws(() => trace(item, { artifacts: { changedPaths: ['target.txt'], presentPaths: ['target.txt'], unchangedPaths: ['target.txt'] } }));
   assert.throws(() => trace(item, { review: { jobId: 'job-one', reviewJobId: 'job-one', codeDigest: code, contractDigest: taskContractDigest(item), verdict: 'approved' } }));
 });
 
 test('unknown file evidence cannot pass and selected/observed coverage is strict', () => {
   const item = task();
-  const unknown = trace(item, { artifacts: { changedPaths: null, unchangedPaths: null }, retainedConstraintIds: null });
+  const unknown = trace(item, { artifacts: { changedPaths: null, presentPaths: null, unchangedPaths: null }, retainedConstraintIds: null });
   const graded = gradeTask(item, unknown);
   assert.equal(graded.taskSuccess, false);
   assert.equal(graded.constraintRetention, 'unknown');
@@ -109,8 +109,8 @@ test('live binds canonical contract and effective config with bounded state and 
   assert.equal(contractDigest(raw.acceptanceContract), taskContractDigest(item));
   await assert.rejects(submitLiveRun({ ...input, config: { ...f.config, defaultMaxTurns: 3 } }));
   await assert.rejects(pollLiveRun({ manager: f.manager, jobId: first.jobId, timeoutMs: Infinity }));
-  const record = (await fs.readdir(f.stateDir)).find(name => name.endsWith('.json'));
-  await fs.rm(path.join(f.stateDir, record)); await fs.symlink('/etc/passwd', path.join(f.stateDir, record));
+  const record = (await fs.readdir(path.join(f.config.stateDir, 'evaluation-runs'))).find(name => name.endsWith('.json'));
+  await fs.rm(path.join(f.config.stateDir, 'evaluation-runs', record)); await fs.symlink('/etc/passwd', path.join(f.config.stateDir, 'evaluation-runs', record));
   await assert.rejects(submitLiveRun(input));
 });
 
@@ -123,7 +123,7 @@ test('crash-stale lock and lost Manager response reconcile one job under simulta
   const original = f.manager.start.bind(f.manager); let lost = false;
   f.manager.start = async (...args) => { const value = await original(...args); if (!lost) { lost = true; throw new Error('lost response'); } return value; };
   await assert.rejects(submitLiveRun(input), /lost response/);
-  await fs.writeFile(path.join(f.stateDir, `${sha256Hex(input.runId)}.lock`), 'crash-stale');
+  await fs.writeFile(path.join(f.config.stateDir, 'evaluation-runs', `${sha256Hex(input.runId)}.json.lock`), 'crash-stale');
   const [first, second] = await Promise.all([submitLiveRun(input), submitLiveRun(input)]);
   assert.equal(first.jobId, second.jobId);
   assert.equal((await fs.readdir(f.manager.jobsDir)).length, 1);

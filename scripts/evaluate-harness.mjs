@@ -116,6 +116,11 @@ async function live(flags) {
   const repository = path.resolve(flags.repository), stateDir = path.resolve(flags['state-dir']);
   const { stdout } = await exec('git',['-C',root,'rev-parse','HEAD'],{timeout:5000,maxBuffer:1024});
   const harnessCommit = stdout.trim();
+  const checkout = await exec('git',['-C',root,'rev-parse','--show-toplevel'],{timeout:5000,maxBuffer:1024});
+  if (path.resolve(checkout.stdout.trim()) !== root) throw new Error('Evaluation source checkout unavailable');
+  const dirty = await exec('git',['-C',root,'status','--porcelain=v1','--untracked-files=all','--',
+    'src/','internal-agent/','evals/','scripts/','package.json','package-lock.json'],{timeout:5000,maxBuffer:4096});
+  if (dirty.stdout.length) throw new Error('Evaluation source checkout is dirty');
   // No Manager/config side effects occur before selection, time, and SHA validation.
   if (!/^[0-9a-f]{40}$/.test(harnessCommit) || !/^[0-9a-f]{40}$/.test(flags['base-commit'])) throw new Error('Committed SHAs required');
   const base = await exec('git',['-C',repository,'rev-parse','--verify',flags['base-commit']+'^{commit}'],{timeout:5000,maxBuffer:1024})
@@ -151,6 +156,11 @@ async function main() {
   return ({ replay,compare,live })[subcommand](flags);
 }
 main().catch(error => {
-  process.stderr.write((error.name || 'Error') + ': ' + error.message + '\n');
+  const message = error instanceof SchemaError || error instanceof SyntaxError ? 'Invalid evaluation input' :
+    error?.name === 'ProvenanceError' ? 'Incompatible evaluation provenance' :
+    ['Error'].includes(error?.name) && typeof error.message === 'string' && error.message.length <= 120 &&
+      /^(Expected replay, compare or live|Unknown or positional argument|Duplicate flag: --[a-z-]+|Missing value for --[a-z-]+|live requires --live|live requires --ack live-execution|Live Manager initialization failed|Live submission failed|Live evidence collection failed)$/.test(error.message)
+      ? error.message : 'Evaluation command failed';
+  process.stderr.write((error?.name === 'SchemaError' ? 'SchemaError' : error?.name === 'ProvenanceError' ? 'ProvenanceError' : 'Error') + ': ' + message + '\n');
   process.exitCode = error.name === 'SchemaError' ? 2 : error.name === 'ProvenanceError' ? 3 : 1;
 });

@@ -21,9 +21,12 @@ function executionCriterionBase(execution) {
 
 function gradeArtifactCriterion(task, trace) {
   const base = executionCriterionBase(trace.execution);
-  const outcome = base ?? (trace.artifacts.changedPaths === null ? { outcome: 'unknown', reason: 'evidence_unavailable' } : task.expectedEvidence.changedPaths.every(p => trace.artifacts.changedPaths.includes(p))
-    ? { outcome: 'pass', reason: null }
-    : { outcome: 'fail', reason: 'missing_evidence' });
+  const changed = trace.artifacts.changedPaths, present = trace.artifacts.presentPaths;
+  const outcome = base ?? (changed === null ? { outcome: 'unknown', reason: 'evidence_unavailable' }
+    : !task.expectedEvidence.changedPaths.every(p => changed.includes(p)) ? { outcome: 'fail', reason: 'missing_evidence' }
+    : present === null ? { outcome: 'unknown', reason: 'evidence_unavailable' }
+    : task.expectedEvidence.changedPaths.every(p => present.includes(p)) ? { outcome: 'pass', reason: null }
+    : { outcome: 'fail', reason: 'required_artifact_absent' });
   return {
     id: 'artifact', kind: 'artifact',
     description: `Required files reported changed: ${task.expectedEvidence.changedPaths.join(', ') || '(none required)'}.`,
@@ -64,8 +67,6 @@ function gradeReviewCriterion(task, trace) {
 function gradeConstraintCriteria(task, trace) {
   return task.expectedEvidence.constraintEvidence.map(({ constraintId, path }) => {
     const description = `File "${path}" reported unchanged (file-preservation evidence only; this does not prove full API semantics for "${constraintId}").`;
-    const base = executionCriterionBase(trace.execution);
-    if (base) return { id: `constraint:${constraintId}`, kind: 'constraint', description, ...base };
     if (trace.retainedConstraintIds === null || trace.artifacts.unchangedPaths === null) return { id: `constraint:${constraintId}`, kind: 'constraint', description, outcome: 'unknown', reason: 'evidence_unavailable' };
     const retained = trace.retainedConstraintIds.includes(constraintId) && trace.artifacts.unchangedPaths.includes(path);
     return { id: `constraint:${constraintId}`, kind: 'constraint', description, outcome: retained ? 'pass' : 'fail', reason: retained ? null : 'missing_evidence' };
@@ -125,6 +126,8 @@ export function gradeTask(task, trace) {
     taskId: task.id,
     criteria,
     taskSuccess: success,
+    constraintApplicable: task.expectedEvidence.requiredConstraintIds.length > 0,
+    resumeApplicable,
     constraintRetention,
     resumeCorrectness,
     latencyMs: trace.timing ? trace.timing.durationMs : null,
@@ -157,6 +160,8 @@ export function gradeSuite({ suite, traces, selectedTaskIds }) {
     if (!trace) {
       return {
         taskId, criteria: [], taskSuccess: false, reason: 'missing_outcome',
+        constraintApplicable: task.expectedEvidence.requiredConstraintIds.length > 0,
+        resumeApplicable: task.expectedEvidence.requiresResume,
         constraintRetention: 'unknown',
         resumeCorrectness: 'unknown',
         latencyMs: null, usage: { totalTokens: null, costUsd: null, observedResponses: 0 },
