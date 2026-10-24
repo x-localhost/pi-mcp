@@ -86,3 +86,10 @@ Explicit task-success count/rate deltas are a small usability improvement, not a
 additional blocker. Remove the minor extra EOF blank line in the incomplete
 fixture. A dedicated Sol correction unit owns these changes; Astra must review
 the resulting committed checkpoint and focused evidence before closure.
+
+Parent additionally identified an executable-source provenance edge before the
+review-fixes handoff: `git rev-parse HEAD` alone can label a dirty evaluator as its
+committed version. Refuse dirty or untracked executable source paths before live
+Manager initialization; keep documentation, external reports and dependency
+caches outside that guard. Add a separate before-fix CLI regression and distinguish
+this parent finding from Astra's five.

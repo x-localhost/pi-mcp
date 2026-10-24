@@ -195,3 +195,8 @@ the complete evaluator suite on gram in
 names are separate from the parent's frozen full-regression source. Shared image
 is read-only. Parent reviews/commits/integrates; native Astra closes the findings;
 parent verifies the final committed replay and regression before main.
+
+Parent's additional committed-source check is included in the same bounded unit:
+live must reject dirty/untracked executable harness paths before initialization,
+not merely record HEAD while running modified code. This extends the existing
+provenance contract; it does not guard unrelated docs, reports or node_modules.
