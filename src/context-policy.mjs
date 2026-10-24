@@ -36,11 +36,7 @@ export function reduceContext(messages, rawPolicy, overheadBytes = 0) {
   if (!Array.isArray(messages) || !Number.isSafeInteger(overheadBytes) || overheadBytes < 0) return { ok: false, reason: 'context_limit' };
   const kept = messages.map((message, index) => ({ message, index }));
   const mandatory = new Set();
-  const firstUser = messages.findIndex(message => message?.role === 'user');
-  const lastUser = messages.findLastIndex(message => message?.role === 'user');
-  for (let i = 0; i < messages.length; i++) if (isSystem(messages[i])) mandatory.add(i);
-  if (firstUser >= 0) mandatory.add(firstUser);
-  if (lastUser >= 0) mandatory.add(lastUser);
+  for (let i = 0; i < messages.length; i++) if (isSystem(messages[i]) || messages[i]?.role === 'user' && !isToolResult(messages[i])) mandatory.add(i);
   // Preserve pending tool state by exact call/result ID, including partial batches.
   for (let i = 0; i < messages.length; i++) if (hasToolCall(messages[i])) {
     const ids = callIds(messages[i]);
@@ -68,7 +64,6 @@ export function reduceContext(messages, rawPolicy, overheadBytes = 0) {
         drop = group;
         break;
       }
-      if (item.message?.role === 'user' && !isToolResult(item.message) && item.index !== firstUser && item.index !== lastUser) { drop = [i]; break; }
     }
     if (!drop) return { ok: false, reason: 'context_limit', messages: kept.map(item => item.message), droppedMessages: messages.length - kept.length };
     kept.splice(drop[0], drop.length);

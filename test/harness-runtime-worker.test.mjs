@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { loadConfig, buildChildEnv } from '../src/config.mjs';
 import { Manager } from '../src/manager.mjs';
+import { Workflow } from '../src/workflow.mjs';
 
 const fake = fileURLToPath(new URL('./fixtures/harness-runtime-fake-pi.mjs', import.meta.url));
 const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'context_limit', 'idle_timeout', 'tool_failure_limit', 'quarantined']);
@@ -72,6 +73,28 @@ test('oversized raw history preserves completed code/verification and supports c
   const context = await waitJob(manager, contextStart.id);
   assert.equal(context.status, 'context_limit', JSON.stringify(context));
   assert.equal(context.artifacts.checkpointComplete, true);
+  const mixedStart = await manager.start({ repository, title: 'Mixed usage', prompt: '[MIXED_USAGE]' });
+  const mixed = await waitJob(manager, mixedStart.id);
+  assert.equal(mixed.status, 'completed', JSON.stringify(mixed));
+  assert.ok(mixed.usage.input > 0);
+  assert.equal(mixed.usageAvailability.totalTokens, false);
+  assert.equal(mixed.usageAvailability.costUsd, false);
+  assert.equal(mixed.usageAvailability.observedResponses, 2);
+  const workflow = new Workflow(manager);
+  const goal = await workflow.create({ version: 1, stages: [
+    { kind: 'delegate', input: { repository, title: 'Invalid usage', prompt: '[INVALID_USAGE]' } },
+    { kind: 'followup', input: { prompt: 'Continue' } }
+  ], budget: { maxTotalTokens: 100, maxCostUsd: 1 } });
+  const admitted = await workflow.advance(goal.id);
+  const invalid = await waitJob(manager, admitted.activeJobId);
+  assert.equal(invalid.status, 'completed', JSON.stringify(invalid));
+  assert.ok(invalid.usage.totalTokens > 0 && invalid.usage.cost.total > 0);
+  assert.equal(invalid.usageAvailability.totalTokens, false);
+  assert.equal(invalid.usageAvailability.costUsd, false);
+  assert.equal(invalid.usageAvailability.observedResponses, 2);
+  const blocked = await workflow.advance(goal.id);
+  assert.equal(blocked.blockedReason, 'usage_unavailable');
+  assert.deepEqual(blocked.observedUsage, { totalTokens: null, costUsd: null });
 });
 
 test('accepted steering text is authoritative in a later fresh rollover', { timeout: 30000 }, async t => {
@@ -94,4 +117,13 @@ test('accepted steering text is authoritative in a later fresh rollover', { time
   assert.deepEqual((await manager.read(started.id)).authoritativeInstructions, ['A [STEER_HOLD]', 'Preserve C']);
   const rolled = await manager.rollover(started.id, { prompt: 'Continue' });
   assert.deepEqual((await manager.read(rolled.id)).handoff.authoritativeInstructions, ['A [STEER_HOLD]', 'Preserve C', 'Continue']);
+  const imageStart = await manager.start({ repository, title: 'Image steer', prompt: 'A [STEER_HOLD]' });
+  for (let i = 0; i < 80; i++) { const current = await manager.status(imageStart.id); if (current.status === 'running' && current.sessionFile) break; await new Promise(resolve => setTimeout(resolve, 100)); }
+  const png = Buffer.from('89504e470d0a1a0a0000000049454e44ae426082', 'hex').toString('base64');
+  const imageAck = await manager.steer(imageStart.id, { message: 'Use this image', images: [{ mimeType: 'image/png', data: png }] });
+  assert.equal(imageAck.status, 'handled_by_pi');
+  const imageDone = await waitJob(manager, imageStart.id);
+  assert.equal(imageDone.status, 'completed');
+  assert.equal((await manager.read(imageStart.id)).imageContextRequired, true);
+  await assert.rejects(manager.rollover(imageStart.id, { prompt: 'Continue' }), /image context/i);
 });

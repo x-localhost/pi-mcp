@@ -155,14 +155,16 @@ function sourceDigests(source) {
   return { code: source?.artifacts?.inputSnapshotDigest ?? null, contract: source?.acceptance?.contractDigest ?? null };
 }
 
-function existingMatches(stage, job) {
+async function existingMatches(manager, stage, job, sourceJob) {
   if (!JOB.test(job?.id) || job.requestId !== stage.intent.requestId) return false;
   const source = stage.intent.sourceJobId;
-  if (stage.kind === 'followup' && job.parentJobId !== source) return false;
+  if (stage.kind === 'followup' && job.parentJobId !== source &&
+    (job.rolloverFromId !== source || job.rolloverSourceSnapshotDigest !== stage.intent.sourceCodeDigest)) return false;
   if (stage.kind === 'review' && (job.reviewSourceJobId !== source || job.reviewSourceSnapshotDigest !== stage.intent.sourceCodeDigest ||
     stage.intent.sourceContractDigest && job.reviewSourceContractDigest !== stage.intent.sourceContractDigest)) return false;
   if (stage.kind === 'rollover' && (job.rolloverFromId !== source || job.rolloverSourceSnapshotDigest !== stage.intent.sourceCodeDigest)) return false;
-  if (stage.kind === 'delegate' && (job.parentJobId || job.reviewSourceJobId)) return false;
+  if (stage.kind === 'delegate' && (job.parentJobId || job.reviewSourceJobId || job.rolloverFromId)) return false;
+  if (typeof manager.workflowRequestMatches === 'function' && !await manager.workflowRequestMatches(stage.kind, sourceJob, { ...stage.input, request_id: stage.intent.requestId }, job)) return false;
   return true;
 }
 
@@ -183,9 +185,12 @@ function countedUsage(store, job) {
   if (store.countedJobs.includes(job.id)) return;
   store.countedJobs.push(job.id);
   const usage = job.usage ?? {};
-  const total = Number.isFinite(usage.totalTokens) && usage.totalTokens >= 0 ? usage.totalTokens : Number.isFinite(usage.total) && usage.total >= 0 ? usage.total :
-    ['input', 'output', 'cacheRead', 'cacheWrite'].every(key => Number.isFinite(usage[key]) && usage[key] >= 0) ? usage.input + usage.output + usage.cacheRead + usage.cacheWrite : null;
-  const cost = Number.isFinite(usage.cost?.total) && usage.cost.total >= 0 ? usage.cost.total : null;
+  const components = ['input', 'output', 'cacheRead', 'cacheWrite'];
+  const componentTotal = components.every(key => Number.isFinite(usage[key]) && usage[key] >= 0) ? components.reduce((sum, key) => sum + usage[key], 0) : null;
+  const measuredTotal = Number.isFinite(usage.totalTokens) && usage.totalTokens > 0 ? usage.totalTokens : Number.isFinite(usage.total) && usage.total > 0 ? usage.total : componentTotal > 0 ? componentTotal : null;
+  const total = job.usageAvailability?.totalTokens === true && job.usageAvailability.observedResponses > 0 ? measuredTotal : null;
+  const cost = job.usageAvailability?.costUsd === true && job.usageAvailability.observedResponses > 0 &&
+    Number.isFinite(usage.cost?.total) && usage.cost.total > 0 ? usage.cost.total : null;
   if (total === null) store.usageUnavailable.totalTokens = true;
   else store.observedUsage.totalTokens += total;
   if (cost === null) store.usageUnavailable.costUsd = true;
@@ -218,7 +223,8 @@ export class Workflow {
     const sourceJobId = last.kind === 'review' ? sourceFor(store) : last.jobId;
     await this.manager.lock(async () => {
       const source = sourceJobId ? await freshJob(this.manager, await this.manager.read(sourceJobId)) : null;
-      store.blockedReason = finalAcceptanceGate(source);
+      const reviewer = last.kind === 'review' && last.jobId ? await freshJob(this.manager, await this.manager.read(last.jobId)) : null;
+      store.blockedReason = reviewer ? finalAcceptanceGate(reviewer) || finalAcceptanceGate(source) : finalAcceptanceGate(source);
       await writeStore(file, store);
     });
   }
@@ -242,7 +248,7 @@ export class Workflow {
     return this.withGoal(id, async () => {
       const file = this.file(id); const store = await readSafe(file);
       if (store.released) throw new Error('Workflow released');
-      if (store.cancelRequested) { await this.deliverCancel(store, file); return publicStatus(store); }
+      if (store.cancelRequested) { await this.deliverCancel(store, file); await this.countTerminalCancellationUsage(store, file); return publicStatus(store); }
       let stage = store.stages[store.index];
       if (!stage) {
         await this.refreshCompletionGate(store, file);
@@ -253,6 +259,7 @@ export class Workflow {
         if (!TERMINAL.has(job.status)) { store.blockedReason = 'active_child'; await writeStore(file, store); return publicStatus(store); }
         countedUsage(store, job);
         if (job.status !== 'completed') { store.blockedReason = 'child_failed'; await writeStore(file, store); return publicStatus(store); }
+        if (stage.kind === 'review' && finalAcceptanceGate(job)) { store.blockedReason = 'acceptance_gate'; await writeStore(file, store); return publicStatus(store); }
         if (DIGEST.test(job.artifacts?.inputSnapshotDigest)) stage.codeDigest = job.artifacts.inputSnapshotDigest;
         if (DIGEST.test(job.acceptance?.contractDigest)) stage.contractDigest = job.acceptance.contractDigest;
         store.index++;
@@ -273,7 +280,7 @@ export class Workflow {
           validatePreparedSource(stage, sourceJobId, source);
           const existing = (await this.manager.all()).find(job => job.requestId === stage.intent.requestId);
           if (existing) {
-            if (!existingMatches(stage, existing)) throw new Error('Workflow request ID points to a different child');
+            if (!await existingMatches(this.manager, stage, existing, source)) throw new Error('Workflow request ID points to a different child');
             stage.jobId = existing.id; await writeStore(file, store); return;
           }
         }
@@ -293,7 +300,18 @@ export class Workflow {
       if (store.blockedReason || stage.jobId) return publicStatus(store);
       const input = { ...stage.input, request_id: stage.intent.requestId };
       let created;
-      if (stage.kind === 'delegate') created = await this.manager.start(input);
+      if (typeof this.manager.submitWorkflowStage === 'function') {
+        const submitted = await this.manager.submitWorkflowStage(stage.kind, sourceJobId, input, async (source, existing) => {
+          validatePreparedSource(stage, sourceJobId, source);
+          if (existing) {
+            if (!await existingMatches(this.manager, stage, existing, source)) throw new Error('Workflow request ID points to a different child');
+            return null;
+          }
+          return store.index === 0 ? null : gate(source, stage);
+        });
+        if (submitted.blockedReason) { store.blockedReason = submitted.blockedReason; await writeStore(file, store); return publicStatus(store); }
+        created = submitted.job;
+      } else if (stage.kind === 'delegate') created = await this.manager.start(input);
       else if (stage.kind === 'followup') created = await this.manager.start(input, sourceJobId);
       else if (stage.kind === 'review') created = await this.manager.review(sourceJobId, input);
       else created = await this.manager.rollover(sourceJobId, input, { automatic: false });
@@ -306,12 +324,18 @@ export class Workflow {
   async deliverCancel(store, file) {
     if (!store.cancelIntent) return;
     if (!store.cancelIntent.jobId && store.cancelIntent.requestId) {
-      const found = await this.manager.lock(async () => (await this.manager.all()).find(job => job.requestId === store.cancelIntent.requestId));
+      const found = await this.manager.lock(async () => {
+        const child = (await this.manager.all()).find(job => job.requestId === store.cancelIntent.requestId);
+        if (!child) return null;
+        const stage = store.stages.find(item => item.intent?.requestId === store.cancelIntent.requestId);
+        if (!stage) throw new Error('Workflow request ID points to a different child');
+        const source = stage.intent.sourceJobId ? await freshJob(this.manager, await this.manager.read(stage.intent.sourceJobId)) : null;
+        if (!await existingMatches(this.manager, stage, child, source)) throw new Error('Workflow request ID points to a different child');
+        validatePreparedSource(stage, stage.intent.sourceJobId, source);
+        return child;
+      });
       if (found) {
         const stage = store.stages.find(item => item.intent?.requestId === store.cancelIntent.requestId);
-        if (!stage || !existingMatches(stage, found)) throw new Error('Workflow request ID points to a different child');
-        const source = stage.intent.sourceJobId ? await this.manager.lock(async () => freshJob(this.manager, await this.manager.read(stage.intent.sourceJobId))) : null;
-        validatePreparedSource(stage, stage.intent.sourceJobId, source);
         store.cancelIntent.jobId = found.id;
         stage.jobId = found.id;
         await writeStore(file, store);
@@ -332,6 +356,7 @@ export class Workflow {
       if (!store.cancelIntent) store.cancelIntent = { jobId: stage?.jobId ?? null, requestId: stage?.intent?.requestId ?? null, at: now() };
       await writeStore(file, store);
       await this.deliverCancel(store, file);
+      await this.countTerminalCancellationUsage(store, file);
       return publicStatus(store);
     });
   }
@@ -346,8 +371,37 @@ export class Workflow {
           const found = (await this.manager.all()).find(job => job.requestId === stage.intent.requestId);
           if (found && !TERMINAL.has(found.status)) throw new Error('Active workflow child cannot be released');
         }
+        if (!store.cancelRequested) {
+          const last = store.stages.at(-1);
+          const final = last.jobId ? await freshJob(this.manager, await this.manager.read(last.jobId)) : null;
+          const sourceId = last.kind === 'review' ? sourceFor(store) : null;
+          const source = sourceId ? await freshJob(this.manager, await this.manager.read(sourceId)) : null;
+          if (finalAcceptanceGate(final) || source && finalAcceptanceGate(source)) throw new Error('Workflow final acceptance was revoked');
+        }
+        if (store.cancelRequested) await this.countTerminalCancellationUsageUnderLock(store);
+        store.released = true;
+        await writeStore(file, store);
       });
-      store.released = true; await writeStore(file, store); return publicStatus(store);
+      return publicStatus(store);
     });
+  }
+  async countTerminalCancellationUsage(store, file) {
+    await this.manager.lock(async () => {
+      await this.countTerminalCancellationUsageUnderLock(store);
+      await writeStore(file, store);
+    });
+  }
+  async countTerminalCancellationUsageUnderLock(store) {
+    for (const stage of store.stages) {
+      let job = stage.jobId ? await this.manager.read(stage.jobId) : null;
+      if (!job && stage.intent) job = (await this.manager.all()).find(candidate => candidate.requestId === stage.intent.requestId);
+      if (!job) continue;
+      if (stage.intent) {
+        const source = stage.intent.sourceJobId ? await freshJob(this.manager, await this.manager.read(stage.intent.sourceJobId)) : null;
+        if (!await existingMatches(this.manager, stage, job, source)) throw new Error('Workflow request ID points to a different child');
+        validatePreparedSource(stage, stage.intent.sourceJobId, source);
+      }
+      if (TERMINAL.has(job.status)) countedUsage(store, await freshJob(this.manager, job));
+    }
   }
 }

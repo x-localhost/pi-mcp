@@ -11,6 +11,7 @@ import { Workflow, readWorkflowReferences } from '../src/workflow.mjs';
 import { withOwnershipLock } from '../src/ownership.mjs';
 import { Manager } from '../src/manager.mjs';
 import { contractDigest } from '../src/acceptance.mjs';
+import { snapshotArtifacts } from '../src/artifacts.mjs';
 
 class FakeManager {
   constructor(stateDir) { this.config = { stateDir }; this.jobs = []; this.calls = []; }
@@ -27,7 +28,7 @@ class FakeManager {
   async review(id, input) { const result = await this.start(input); this.calls.at(-1).kind = 'review'; Object.assign(this.jobs.at(-1), { reviewSourceJobId: id, reviewSourceSnapshotDigest: 'a'.repeat(64), reviewSourceContractDigest: 'b'.repeat(64) }); return result; }
   async rollover(id, input, options) { const result = await this.start(input); this.calls.at(-1).kind = 'rollover'; this.calls.at(-1).options = options; Object.assign(this.jobs.at(-1), { rolloverFromId: id, rolloverSourceSnapshotDigest: 'a'.repeat(64) }); return result; }
   async cancel(id) { this.calls.push({ kind: 'cancel', id }); if (this.cancelFailOnce) { this.cancelFailOnce = false; throw new Error('delivery interrupted'); } return { id, cancellationRequested: true }; }
-  complete(id, data = {}) { Object.assign(this.jobs.find(item => item.id === id), { status: 'completed', execution: { status: 'passed' }, verification: { status: 'passed' }, acceptance: { status: 'not_requested' }, artifacts: { inputSnapshotDigest: 'a'.repeat(64) }, usage: { totalTokens: 20, cost: { total: 0.2 } }, ...data }); }
+  complete(id, data = {}) { Object.assign(this.jobs.find(item => item.id === id), { status: 'completed', execution: { status: 'passed' }, verification: { status: 'passed' }, acceptance: { status: 'not_requested' }, artifacts: { inputSnapshotDigest: 'a'.repeat(64) }, usage: { totalTokens: 20, cost: { total: 0.2 } }, usageAvailability: { totalTokens: true, costUsd: true, observedResponses: 1 }, ...data }); }
 }
 
 const make = async () => { const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-workflow-')); const manager = new FakeManager(stateDir); return { stateDir, manager, workflow: new Workflow(manager), cleanup: () => fs.rm(stateDir, { recursive: true, force: true }) }; };
@@ -369,4 +370,126 @@ test('real Manager recomputes acceptance and cleanup protects durable job and re
     await fs.writeFile(storeFile, JSON.stringify(corrupt));
     await assert.rejects(manager.cleanup({ job_ids: [raw.id], dry_run: true }), /plan changed/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('review child with explicit incomplete acceptance cannot advance', async () => {
+  const f = await make();
+  try {
+    const created = await f.workflow.create({ version: 1, stages: [stages[0], { kind: 'review', input: { prompt: 'Inspect', acceptance: { version: 1, required_artifact_paths: ['report.txt'] } } }, { kind: 'followup', input: { prompt: 'Continue' } }] });
+    const first = await f.workflow.advance(created.id);
+    f.manager.complete(first.activeJobId, { acceptance: { status: 'pending_review', contractDigest: 'b'.repeat(64) } });
+    const review = await f.workflow.advance(created.id);
+    f.manager.complete(review.activeJobId, { acceptance: { status: 'missing_artifacts', contractDigest: 'c'.repeat(64) } });
+    f.manager.jobs[0].acceptance.status = 'accepted';
+    assert.equal((await f.workflow.advance(created.id)).blockedReason, 'acceptance_gate');
+    assert.equal(f.manager.jobs.length, 2);
+  } finally { await f.cleanup(); }
+});
+
+test('zero placeholder budget measurements fail closed and terminal cancel usage counts once', async () => {
+  const f = await make();
+  try {
+    const budgeted = await f.workflow.create({ version: 1, stages, budget: { maxCostUsd: 1 } });
+    const first = await f.workflow.advance(budgeted.id);
+    f.manager.complete(first.activeJobId, { usage: { totalTokens: 20, cost: { total: 0 } } });
+    const blocked = await f.workflow.advance(budgeted.id);
+    assert.equal(blocked.blockedReason, 'usage_unavailable');
+    assert.equal(blocked.observedUsage.costUsd, null);
+    const cancelled = await f.workflow.create({ version: 1, stages: [stages[0]], budget: { maxTotalTokens: 100 } });
+    const child = await f.workflow.advance(cancelled.id);
+    f.manager.complete(child.activeJobId, { status: 'cancelled', usage: { totalTokens: 7, cost: { total: 0.3 } } });
+    await f.workflow.cancel(cancelled.id);
+    const once = await f.workflow.advance(cancelled.id);
+    assert.equal(once.observedUsage.totalTokens, 7);
+    assert.equal((await f.workflow.advance(cancelled.id)).observedUsage.totalTokens, 7);
+  } finally { await f.cleanup(); }
+});
+
+test('partial positive aggregate cannot satisfy a budget after one response lacks measurement', async () => {
+  const f = await make();
+  try {
+    const created = await f.workflow.create({ version: 1, stages, budget: { maxTotalTokens: 100, maxCostUsd: 1 } });
+    const first = await f.workflow.advance(created.id);
+    f.manager.complete(first.activeJobId, { usage: { totalTokens: 20, cost: { total: 0.2 } },
+      usageAvailability: { totalTokens: false, costUsd: false, observedResponses: 2 } });
+    const blocked = await f.workflow.advance(created.id);
+    assert.equal(blocked.blockedReason, 'usage_unavailable');
+    assert.deepEqual(blocked.observedUsage, { totalTokens: null, costUsd: null });
+  } finally { await f.cleanup(); }
+});
+
+test('release rechecks revoked final acceptance', async () => {
+  const f = await make();
+  try {
+    const created = await f.workflow.create({ version: 1, stages: [stages[0]] });
+    const first = await f.workflow.advance(created.id);
+    f.manager.complete(first.activeJobId, { acceptance: { status: 'accepted' } });
+    assert.equal((await f.workflow.advance(created.id)).nextAction, 'complete');
+    f.manager.jobs[0].acceptance.status = 'review_rejected';
+    await assert.rejects(f.workflow.release(created.id), /acceptance/i);
+  } finally { await f.cleanup(); }
+});
+
+async function realQueuedFixture(t, sourceAcceptance) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-workflow-queued-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, 'repo'); await fs.mkdir(repository);
+  const git = (...args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+  await fs.writeFile(path.join(repository, 'base.txt'), 'base'); git('add', '.'); git('commit', '-qm', 'base');
+  const manager = await new Manager({ stateDir: path.join(root, 'state'), allowedRoots: [root], maxConcurrent: 2,
+    defaultTimeoutSeconds: 30, maxTimeoutSeconds: 60, defaultMaxTurns: 2, piPath: '/bin/true', allowedCommands: [], provider: 'mock', model: 'mock',
+    queue: { maxPending: 8, maxWaitSeconds: 60, dispatchIntervalMs: 100 }, verification: { commands: [] }, offlineMaterials: { materials: [] } }, {}, { spawnWorker: false }).init();
+  const workflow = new Workflow(manager);
+  const created = await workflow.create({ version: 1, stages: [
+    { kind: 'delegate', input: { repository, title: 'Source', prompt: 'A', ...(sourceAcceptance ? { acceptance: sourceAcceptance } : {}) } },
+    { kind: 'followup', input: { prompt: 'Continue' } }
+  ] });
+  const first = await workflow.advance(created.id); await manager.dispatchOnce();
+  const source = await manager.read(first.activeJobId);
+  const artifact = await snapshotArtifacts({ jobDir: manager.jobDir(source.id), worktree: source.worktree, baseCommit: source.baseCommit });
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, verification: { status: 'not_requested' },
+    sessionCheckpoint: { complete: true, size: 15 * 1024 * 1024 }, artifacts: { checkpointComplete: true, inputSnapshotDigest: artifact.inputSnapshotDigest, manifestSha256: artifact.manifestSha256 }, usage: { totalTokens: 10, cost: { total: 0.1 } }, usageAvailability: { totalTokens: true, costUsd: true, observedResponses: 1 } });
+  await fs.writeFile(path.join(manager.jobDir(source.id), 'job.json'), JSON.stringify(source));
+  return { manager, workflow, created, source, repository };
+}
+
+test('real Manager reconciles and cancels an automatic rollover after lost submit response', async t => {
+  const { manager, workflow, created, source } = await realQueuedFixture(t);
+  const original = manager.submitWorkflowStage.bind(manager); let lost = false;
+  manager.submitWorkflowStage = async (...args) => { const result = await original(...args); if (args[0] === 'followup' && !lost) { lost = true; throw new Error('lost submit response'); } return result; };
+  await assert.rejects(workflow.advance(created.id), /lost submit response/);
+  const child = (await manager.all()).find(job => job.rolloverFromId === source.id);
+  assert.ok(child);
+  const recovered = await workflow.advance(created.id);
+  assert.equal(recovered.activeJobId, child.id);
+  await workflow.cancel(created.id);
+  assert.equal((await manager.read(child.id)).status, 'cancelled');
+});
+
+test('real Manager request hash prevents colliding recovery and cancellation', async t => {
+  const { manager, workflow, created, source } = await realQueuedFixture(t);
+  const original = manager.submitWorkflowStage.bind(manager); let lost = false;
+  manager.submitWorkflowStage = async (...args) => { const result = await original(...args); if (args[0] === 'followup' && !lost) { lost = true; throw new Error('lost submit response'); } return result; };
+  await assert.rejects(workflow.advance(created.id), /lost submit response/);
+  const child = (await manager.all()).find(job => job.rolloverFromId === source.id);
+  child.requestHash = 'f'.repeat(64); await fs.writeFile(path.join(manager.jobDir(child.id), 'job.json'), JSON.stringify(child));
+  await assert.rejects(workflow.advance(created.id), /different child/);
+  await assert.rejects(workflow.cancel(created.id), /different child/);
+});
+
+test('atomic Manager admission rechecks revoked acceptance after workflow intent prepare', async t => {
+  const contract = { version: 1, require_review: true };
+  const { manager, workflow, created, source } = await realQueuedFixture(t, contract);
+  source.reviewAttestations = [{ authority: 'caller', verdict: 'approved', sourceJobId: source.id, inputSnapshotDigest: source.artifacts.inputSnapshotDigest,
+    contractDigest: contractDigest(contract), requestId: 'preapproved' }];
+  await fs.writeFile(path.join(manager.jobDir(source.id), 'job.json'), JSON.stringify(source));
+  const original = manager.submitWorkflowStage.bind(manager);
+  manager.submitWorkflowStage = async (...args) => {
+    const current = await manager.read(source.id); current.reviewAttestations = [];
+    await fs.writeFile(path.join(manager.jobDir(source.id), 'job.json'), JSON.stringify(current));
+    return original(...args);
+  };
+  const blocked = await workflow.advance(created.id);
+  assert.equal(blocked.blockedReason, 'acceptance_gate');
+  assert.equal((await manager.all()).filter(job => job.parentJobId === source.id).length, 0);
 });

@@ -417,6 +417,7 @@ export async function startGateway({ config, socketPath, requestImpl = https.req
   let active = 0;
   const rateTimes = [];
   const audit = [];
+  const observedCalls = new Map();
   const auditPath = `${socketPath}.audit.jsonl`;
   const sockets = new Set();
   const server = http.createServer({ maxHeaderSize: MAX_HEADERS }, (req, res) => {
@@ -432,13 +433,21 @@ export async function startGateway({ config, socketPath, requestImpl = https.req
       try { trace = readTraceHeaders(req); }
       catch { respond(res, 400, 'Invalid chat request\n'); return; }
     }
+    let observedRepeatOfCall = false;
+    if (trace) {
+      const key = `${trace.jobId}:${trace.requestId}:${trace.attemptId}`;
+      observedRepeatOfCall = observedCalls.has(key);
+      observedCalls.delete(key); observedCalls.set(key, true);
+      if (observedCalls.size > 256) observedCalls.delete(observedCalls.keys().next().value);
+    }
     let recorded = false;
     const record = () => {
       if (recorded) return;
       recorded = true;
       const completed = res.writableFinished;
       const category = !completed && res.__gatewayCategory === 'ok' ? 'connect' : res.__gatewayCategory ?? 'protocol';
-      audit.push({ requestId, ...(trace ? { jobId: trace.jobId, providerRequestId: trace.requestId, attemptId: trace.attemptId } : {}), category, status: res.statusCode, completed, aborted: !completed, elapsedMs: Math.min(120_000, Date.now() - start) });
+      audit.push({ requestId, ...(trace ? { jobId: trace.jobId, providerRequestId: trace.requestId, providerCallId: trace.attemptId,
+        ...(observedRepeatOfCall ? { observedRepeatOfCall: true } : {}) } : {}), category, status: res.statusCode, completed, aborted: !completed, elapsedMs: Math.min(120_000, Date.now() - start) });
       if (audit.length > 256) audit.shift();
       const tmp = `${auditPath}.${randomUUID()}`;
       try { fs.writeFileSync(tmp, audit.map(entry => JSON.stringify(entry)).join('\n') + '\n', { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, auditPath); }

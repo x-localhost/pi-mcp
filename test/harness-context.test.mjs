@@ -101,3 +101,57 @@ test('real Pi drops a complete two-tool group and observation omits raw call dat
     await fs.rm(tmp, { recursive: true, force: true });
   }
 });
+
+test('real Pi reports logical calls and streaming progress without inventing inner SDK retry attempts', { timeout: 40_000 }, async t => {
+  for (const failure of ['rate_limit', 'transport']) await t.test(failure, { timeout: 18_000 }, async () => {
+    const requests = [];
+    const mock = http.createServer((req, res) => {
+      requests.push({ requestId: req.headers['x-pi-request-id'], attemptId: req.headers['x-pi-attempt-id'] });
+      if (requests.length === 1 && failure === 'rate_limit') { res.writeHead(429, { 'content-type': 'application/json', 'retry-after-ms': '1' }); res.end(JSON.stringify({ error: { message: 'test retry', type: 'rate_limit_error' } })); return; }
+      if (requests.length === 1 && failure === 'transport') { req.socket.destroy(); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      let index = 0; const letters = ['H', 'e', 'l', 'l', 'o'];
+      const timer = setInterval(() => {
+        if (index < letters.length) res.write(`data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: letters[index++] }, finish_reason: null }] })}\n\n`);
+        else { clearInterval(timer); res.write(`data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`); res.end('data: [DONE]\n\n'); }
+      }, 90);
+    });
+    await new Promise(resolve => mock.listen(0, '127.0.0.1', resolve));
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'harness-retry-'));
+    let child; let rpc; let stderr = '';
+    try {
+      const agentDir = path.join(tmp, 'agent'), worktree = path.join(tmp, 'worktree'), sessionDir = path.join(tmp, 'sessions');
+      await Promise.all([fs.mkdir(agentDir), fs.mkdir(worktree), fs.mkdir(sessionDir)]);
+      await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ retry: { enabled: false, provider: { maxRetries: 1, maxRetryDelayMs: 1000 } } }));
+      await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { mock: { baseUrl: `http://127.0.0.1:${mock.address().port}/v1`, api: 'openai-completions', apiKey: '$MOCK_API_KEY', models: [{ id: 'mock', name: 'Mock', contextWindow: 128000, maxTokens: 512, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
+      const readyFile = path.join(tmp, 'ready.json'), observationFile = path.join(tmp, 'events.jsonl'), activityFile = path.join(tmp, 'activity.json'), policyFile = path.join(tmp, 'policy.json');
+      await fs.writeFile(policyFile, JSON.stringify({ nonce: 'test-nonce', readyFile, observationFile, activityFile, worktree, mode: 'review', denyFile: path.join(tmp, 'deny.jsonl'), allowedCommands: [], traceInternalGateway: true,
+        jobId: '11111111-1111-4111-8111-111111111111', observation: { idleTimeoutMs: 400, maxEvents: 256, maxBytes: 65536 }, context: { maxMessages: 8, maxBytes: 65536 } }));
+      child = spawn(process.execPath, [cli, '--mode', 'rpc', '--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve', '--offline', '--tools', 'read,grep,find,ls', '--session-dir', sessionDir, '--session-id', `retry-${failure}`, '-e', extension],
+        { cwd: worktree, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_MCP_POLICY: policyFile, MOCK_API_KEY: 'test-only-key', PI_OFFLINE: '1', PI_TELEMETRY: '0', PI_SKIP_VERSION_CHECK: '1', DO_NOT_TRACK: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); }); rpc = new RpcClient(child.stdout, child.stdin);
+      let ready; for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse, () => null); if (ready || child.exitCode !== null) break; await sleep(100); }
+      assert.ok(ready, stderr); await rpc.request('set_model', { provider: 'mock', modelId: 'mock' });
+      const settled = rpc.waitFor('agent_settled', 12_000); settled.catch(() => {});
+      assert.equal((await rpc.request('prompt', { message: 'Reply Hello.' })).data?.disposition, 'started'); await settled;
+      assert.equal(requests.length, 2, stderr);
+      assert.equal(requests[0].requestId, requests[1].requestId);
+      assert.equal(requests[0].attemptId, requests[1].attemptId);
+      const records = (await fs.readFile(observationFile, 'utf8')).trim().split('\n').map(JSON.parse);
+      assert.equal(records.filter(item => item.kind === 'provider_retry').length, 0);
+      assert.equal(records.filter(item => item.kind === 'provider_request').length, 1);
+      assert.ok(records.filter(item => item.kind === 'assistant_progress').length >= 2);
+      assert.equal(JSON.stringify(records).includes('Hello'), false);
+      const second = rpc.waitFor('agent_settled', 10_000); second.catch(() => {});
+      assert.equal((await rpc.request('prompt', { message: 'Reply again.' })).data?.disposition, 'started'); await second;
+      assert.equal(requests.length, 3);
+      assert.notEqual(requests[2].requestId, requests[1].requestId);
+    } finally {
+      rpc?.close(); child?.kill('SIGTERM');
+      await Promise.race([new Promise(resolve => child?.once('exit', resolve) ?? resolve()), sleep(1000)]);
+      if (child?.exitCode === null) child.kill('SIGKILL');
+      mock.closeAllConnections(); await new Promise(resolve => mock.close(resolve));
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+});

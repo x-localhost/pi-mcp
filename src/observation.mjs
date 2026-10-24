@@ -25,7 +25,7 @@ async function atomicText(file, value) {
   finally { await fs.rm(tmp, { force: true }).catch(() => {}); }
 }
 
-const KINDS = new Set(['heartbeat', 'tool_start', 'tool_end', 'provider_request', 'provider_response', 'provider_retry', 'compaction', 'context_reduction', 'agent_start', 'agent_end']);
+const KINDS = new Set(['heartbeat', 'tool_start', 'tool_end', 'provider_request', 'provider_response', 'provider_retry', 'compaction', 'context_reduction', 'agent_start', 'agent_end', 'turn_start', 'assistant_progress']);
 const CATEGORIES = new Set(['ok', 'auth', 'rate_limit', 'timeout', 'tls', 'connect', 'protocol', 'upstream', 'tool', 'denied']);
 export function createObservation({ observationFile, activityFile, stopFile, jobId, policy: rawPolicy, onStop } = {}) {
   const policy = normalizeObservation(rawPolicy);
@@ -41,7 +41,7 @@ export function createObservation({ observationFile, activityFile, stopFile, job
       const event = { version: 1, id: randomUUID(), kind, at };
       if (typeof jobId === 'string' && /^[0-9a-f-]{36}$/i.test(jobId)) event.jobId = jobId;
       if (typeof input.toolName === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(input.toolName)) event.toolName = input.toolName;
-      for (const key of ['toolId', 'requestId', 'attemptId']) if (typeof input[key] === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(input[key])) event[key] = input[key];
+      for (const key of ['toolId', 'requestId', 'providerCallId']) if (typeof input[key] === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(input[key])) event[key] = input[key];
       if (typeof input.durationMs === 'number' && Number.isFinite(input.durationMs)) event.durationMs = Math.min(120_000, Math.max(0, Math.floor(input.durationMs)));
       if (typeof input.isError === 'boolean') event.isError = input.isError;
       if (typeof input.category === 'string' && CATEGORIES.has(input.category)) event.category = input.category;
@@ -56,7 +56,7 @@ export function createObservation({ observationFile, activityFile, stopFile, job
       if (kind === 'tool_end') {
         state.consecutiveToolFailures = input.isError === true ? state.consecutiveToolFailures + 1 : 0;
         if (input.isError !== true) state.lastProgressAt = at;
-      } else if (['agent_start', 'agent_end', 'context_reduction', 'compaction'].includes(kind)) state.lastProgressAt = at;
+      } else if (kind === 'assistant_progress' || kind === 'turn_start' || kind === 'compaction' && input.outcome === 'completed') state.lastProgressAt = at;
       if (activityFile) await atomic(activityFile, state);
       if (!stopped && policy.consecutiveFailureLimit && state.consecutiveToolFailures >= policy.consecutiveFailureLimit) await stop('repeated_tool_failure');
       return event;

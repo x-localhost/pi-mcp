@@ -186,3 +186,24 @@ test('ordinary 10001 character task remains admissible but rollover refuses over
   Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
   await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /too large/);
 });
+
+test('ordinary 40001 Korean character prompt remains admissible while rollover fails bounded handoff', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const started = await manager.start({ repository, title: 'Korean task', prompt: '가'.repeat(40001) });
+  await manager.dispatchOnce();
+  const source = await manager.read(started.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
+  await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /too large/);
+});
+
+test('initial image context blocks automatic fresh rollover while code review remains available', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const png = Buffer.from('89504e470d0a1a0a0000000049454e44ae426082', 'hex').toString('base64');
+  const started = await manager.start({ repository, title: 'Image task', prompt: 'Inspect image', images: [{ mimeType: 'image/png', data: png }] });
+  await manager.dispatchOnce();
+  const source = await manager.read(started.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' }, sessionCheckpoint: { complete: true, size: 15 * 1024 * 1024 } }); await write(source);
+  await assert.rejects(manager.start({ prompt: 'Continue' }, source.id), /image context/i);
+  const review = await manager.review(source.id, { prompt: 'Review code' });
+  assert.equal((await manager.read(review.id)).codeOnly, true);
+});

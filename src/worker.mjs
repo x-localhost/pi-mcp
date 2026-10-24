@@ -77,9 +77,18 @@ const checkBudget = () => {
   }
 };
 const addUsage = usage => {
-  if (!usage || typeof usage !== 'object') return;
-  const invalid = Object.entries(usage).some(([key, value]) => key === 'cost' ? value && typeof value === 'object' && Object.values(value).some(amount => typeof amount === 'number' && (!Number.isFinite(amount) || amount < 0))
+  const invalid = usage && typeof usage === 'object' && Object.entries(usage).some(([key, value]) => key === 'cost' ? value && typeof value === 'object' && Object.values(value).some(amount => typeof amount === 'number' && (!Number.isFinite(amount) || amount < 0))
     : typeof value === 'number' && (!Number.isFinite(value) || value < 0));
+  const measured = value => Number.isFinite(value) && value >= 0;
+  const components = ['input', 'output', 'cacheRead', 'cacheWrite'];
+  const componentTotal = components.every(key => measured(usage?.[key])) ? components.reduce((sum, key) => sum + usage[key], 0) : null;
+  const tokenTotal = [usage?.totalTokens, usage?.total, componentTotal].find(value => measured(value) && value > 0) ?? null;
+  const available = job.usageAvailability || { totalTokens: true, costUsd: true, observedResponses: 0 };
+  available.observedResponses = Math.min(1_000_000, available.observedResponses + 1);
+  available.totalTokens = available.totalTokens && !invalid && tokenTotal > 0 && available.observedResponses < 1_000_000;
+  available.costUsd = available.costUsd && !invalid && measured(usage?.cost?.total) && usage.cost.total > 0 && available.observedResponses < 1_000_000;
+  job.usageAvailability = available;
+  if (!usage || typeof usage !== 'object') return;
   if (invalid) {
     if (Object.keys(runtime.budgets || {}).length) { job.budget = { status: 'unavailable', reason: 'Invalid measured usage from provider', inFlightOvershootPossible: true }; stop('budget_unavailable').catch(() => {}); }
     return;
@@ -418,6 +427,7 @@ async function pumpControls() {
         const status = disposition === 'queued' ? 'queued_by_pi' : 'handled_by_pi';
         job.authoritativeInstructions = authoritativeInstructions;
         job.authoritativeSteerIds = [...(job.authoritativeSteerIds || []), control.id];
+        if (images.length) job.imageContextRequired = true;
         await save();
         await atomicJson(ack, { id: control.id, status, disposition });
         await fs.rm(path.join(controls, processing), { force: true });
@@ -456,7 +466,7 @@ async function consumeObservation() {
         seenObservationIds.add(item.id);
         if (seenObservationIds.size > 2048) seenObservationIds.delete(seenObservationIds.values().next().value);
         const safe = { type: 'observation', kind: item.kind, at: item.at };
-        for (const field of ['jobId', 'requestId', 'attemptId', 'toolId']) if (typeof item[field] === 'string' && /^[0-9a-f-]{36}$/.test(item[field])) safe[field] = item[field];
+        for (const field of ['jobId', 'requestId', 'providerCallId', 'toolId']) if (typeof item[field] === 'string' && /^[0-9a-f-]{36}$/.test(item[field])) safe[field] = item[field];
         if (typeof item.toolName === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(item.toolName)) safe.toolName = item.toolName;
         for (const field of ['durationMs', 'isError', 'droppedMessages']) if (typeof item[field] === 'number' && Number.isFinite(item[field]) || typeof item[field] === 'boolean') safe[field] = item[field];
         for (const field of ['category', 'outcome', 'retryReason']) if (typeof item[field] === 'string' && /^[a-z_]{1,40}$/.test(item[field])) safe[field] = item[field];

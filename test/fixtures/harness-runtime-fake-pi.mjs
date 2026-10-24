@@ -16,7 +16,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   let request; try { request = JSON.parse(line); } catch { continue; }
   if (request.type === 'get_state') send({ type: 'response', id: request.id, command: request.type, success: true, data: { sessionFile, model } });
   else if (request.type === 'get_session_stats') send({ type: 'response', id: request.id, command: request.type, success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 } });
-  else if (request.type === 'set_model') { model = { provider: request.provider, id: request.modelId, input: ['text'] }; send({ type: 'response', id: request.id, command: request.type, success: true, data: model }); }
+  else if (request.type === 'set_model') { model = { provider: request.provider, id: request.modelId, input: ['text', 'image'] }; send({ type: 'response', id: request.id, command: request.type, success: true, data: model }); }
   else if (request.type === 'abort') { send({ type: 'response', id: request.id, command: request.type, success: true }); process.exit(0); }
   else if (request.type === 'steer') {
     send({ type: 'response', id: request.id, command: request.type, success: true, data: { disposition: 'handled' } });
@@ -37,7 +37,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     if (request.message.includes('[STEER_HOLD]')) continue;
     if (request.message.includes('[CONTEXT_STOP]')) await fs.writeFile(policy.stopFile, JSON.stringify({ version: 1, reason: 'context_limit', at: new Date().toISOString() }));
     send({ type: 'turn_start' });
-    send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'completed' }], usage: { input: 1, output: 1 } } });
+    if (request.message.includes('[MIXED_USAGE]')) send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'first' }] } });
+    if (request.message.includes('[INVALID_USAGE]')) send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'invalid measured usage' }],
+      usage: { input: -1, output: 1, totalTokens: 2, cost: { input: -0.1, total: 0.2 } } } });
+    send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'completed' }],
+      usage: request.message.includes('[INVALID_USAGE]') ? { input: 1, output: 1, totalTokens: 2, cost: { total: 0.2 } } : { input: 1, output: 1 } } });
     send({ type: 'agent_settled' });
   }
 }

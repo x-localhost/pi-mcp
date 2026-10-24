@@ -52,6 +52,33 @@ test('context reduction drops complete old tool groups and retains mandatory con
   assert.equal(guardProviderPayload({ input: [first], model: 'response-model' }, { maxMessages: 8, maxBytes: 65_536 }).ok, true);
 });
 
+test('context reduction retains every user instruction in native and provider forms', () => {
+  const system = { role: 'system', content: 'Rules' };
+  const first = { role: 'user', content: 'A' };
+  const middle = { role: 'user', content: 'Preserve C' };
+  const latest = { role: 'user', content: 'Continue' };
+  const old = { role: 'assistant', content: 'x'.repeat(70_000) };
+  const reduced = reduceContext([system, first, old, middle, latest], { maxMessages: 8, maxBytes: 65_536 });
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.messages.includes(middle), true);
+  const impossible = reduceContext([system, first, { role: 'user', content: 'C'.repeat(70_000) }, latest], { maxMessages: 8, maxBytes: 65_536 });
+  assert.equal(impossible.ok, false);
+  const provider = guardProviderPayload({ messages: [first, old, middle, latest] }, { maxMessages: 8, maxBytes: 65_536 });
+  assert.equal(provider.ok, true);
+  assert.equal(provider.payload.messages.includes(middle), true);
+});
+
+test('observation progress ignores compaction starts and repeated reductions', async () => {
+  const observer = createObservation({});
+  const start = observer.snapshot().lastProgressAt;
+  await observer.record('compaction', { outcome: 'started' });
+  await observer.record('context_reduction', { droppedMessages: 1 });
+  await observer.record('compaction', { outcome: 'failed' });
+  assert.equal(observer.snapshot().lastProgressAt, start);
+  await observer.record('assistant_progress');
+  assert.notEqual(observer.snapshot().lastProgressAt, start);
+});
+
 test('observation writes only allowlisted metadata and tracks progress separately', async () => {
   const { mkdtemp, readFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

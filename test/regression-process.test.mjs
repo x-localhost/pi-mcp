@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Manager, atomicJson } from '../src/manager.mjs';
 
@@ -82,11 +83,13 @@ test('separate processes exclude sibling followups from one worktree', async () 
   const parent = await manager.start({ repository: repo, title: 'parent', prompt: 'parent' });
   const privateParent = await manager.read(parent.id);
   const sessionFile = path.join(privateParent.sessionDir, 'session.jsonl');
-  await fs.writeFile(sessionFile, '{}\n');
-  await atomicJson(path.join(manager.jobDir(parent.id), 'job.json'), { ...privateParent, status: 'completed', sessionFile });
+  const sessionBytes = Buffer.from('{}\n');
+  await fs.writeFile(sessionFile, sessionBytes);
+  await atomicJson(path.join(manager.jobDir(parent.id), 'job.json'), { ...privateParent, status: 'completed', sessionFile,
+    sessionCheckpoint: { complete: true, size: sessionBytes.length, sha256: createHash('sha256').update(sessionBytes).digest('hex') } });
   const result = await parallel(config, [{ prompt: 'one', request_id: 'follow-one' }, { prompt: 'two', request_id: 'follow-two' }], root, parent.id);
   assert.equal(result.filter(item => item.ok).length, 1);
-  assert.match(result.find(item => !item.ok).error, /Worktree already active/);
+  assert.match(result.find(item => !item.ok).error, /Worktree already active|not latest worktree tip/);
 });
 
 test('terminal parent with no recorded session can retry in its valid worktree', async () => {

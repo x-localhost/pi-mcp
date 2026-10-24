@@ -15,9 +15,9 @@ export default function policyExtension(pi) {
   let observer;
   let contextPolicy;
   let observationPolicy;
-  let attemptId = randomUUID();
+  let providerCallId = randomUUID();
   let requestId = randomUUID();
-  let pendingRetry = null;
+  let lastStreamProgressAt = 0;
   const toolIds = new Map();
   let configuredToolNames = new Set();
   const ready = fs.readFile(configFile, 'utf8').then(text => {
@@ -74,6 +74,7 @@ export default function policyExtension(pi) {
   });
   pi.on('context_with_system', async (event, ctx) => {
     await ready;
+    requestId = randomUUID();
     const result = reduceContext(event.messages, contextPolicy);
     if (!result.ok) { await stop('context_limit', ctx); return; }
     if (result.droppedMessages) await observer.record('context_reduction', { droppedMessages: result.droppedMessages });
@@ -81,7 +82,6 @@ export default function policyExtension(pi) {
   });
   pi.on('before_provider_request', async (event, ctx) => {
     await ready;
-    if (!pendingRetry) requestId = randomUUID();
     const result = guardProviderPayload(event.payload, contextPolicy);
     if (!result.ok) { await stop('context_limit', ctx); return event.payload; }
     if (result.droppedMessages) await observer.record('context_reduction', { droppedMessages: result.droppedMessages });
@@ -89,21 +89,30 @@ export default function policyExtension(pi) {
   });
   pi.on('before_provider_headers', async event => {
     await ready;
-    attemptId = randomUUID();
+    providerCallId = randomUUID();
     if (policy.traceInternalGateway === true && typeof policy.jobId === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(policy.jobId)) {
       event.headers['x-pi-job-id'] = policy.jobId;
       event.headers['x-pi-request-id'] = requestId;
-      event.headers['x-pi-attempt-id'] = attemptId;
+      event.headers['x-pi-attempt-id'] = providerCallId;
     }
-    if (pendingRetry) { await observer.record('provider_retry', { requestId, attemptId, retryReason: pendingRetry }); pendingRetry = null; }
-    await observer.record('provider_request', { requestId, attemptId });
+    await observer.record('provider_request', { requestId, providerCallId });
   });
   pi.on('after_provider_response', async event => {
     await ready;
     const category = event.status === 429 ? 'rate_limit' : event.status >= 500 ? 'upstream' : event.status >= 400 ? 'protocol' : 'ok';
-    await observer.record('provider_response', { attemptId, category, isError: event.status >= 400 });
-    pendingRetry = event.status === 429 || event.status >= 500 ? category : null;
+    await observer.record('provider_response', { providerCallId, category, isError: event.status >= 400 });
   });
+  pi.on('message_update', async event => {
+    await ready;
+    const update = event.assistantMessageEvent;
+    if (!['text_delta', 'thinking_delta', 'toolcall_delta'].includes(update?.type) || typeof update.delta !== 'string' || !update.delta.length) return;
+    const at = Date.now();
+    const progressIntervalMs = Math.min(1000, Math.max(1, Math.floor((observationPolicy.idleTimeoutMs || 4000) / 4)));
+    if (at - lastStreamProgressAt < progressIntervalMs) return;
+    lastStreamProgressAt = at;
+    await observer.record('assistant_progress');
+  });
+  pi.on('turn_start', async () => { await ready; await observer.record('turn_start'); });
   pi.on('tool_execution_start', async event => {
     await ready;
     const toolId = randomUUID();
@@ -122,6 +131,6 @@ export default function policyExtension(pi) {
   pi.on('session_before_compact', async event => { await ready; await observer.record('compaction', { outcome: 'started' }); });
   pi.on('session_compact', async () => { await ready; await observer.record('compaction', { outcome: 'completed' }); });
   pi.on('session_compact_failed', async () => { await ready; await observer.record('compaction', { outcome: 'failed' }); });
-  pi.on('agent_settled', async () => { await ready; pendingRetry = null; await observer.record('agent_end'); });
+  pi.on('agent_settled', async () => { await ready; await observer.record('agent_end'); });
   pi.on('session_shutdown', async () => { if (approvedSession) { await approvedSession.close(); approvedSession = null; } });
 }

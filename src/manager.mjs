@@ -27,6 +27,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
 const sha = value => createHash('sha256').update(value).digest('hex');
 const stable = value => JSON.stringify(value, (_key, item) => item && !Array.isArray(item) && typeof item === 'object' ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
+const admissionHash = (input, repository, parentId = null, forkFromId = null, codeOnly = false, reviewSourceId = null, rolloverFromId = null) =>
+  sha(stable({ ...input, repository, parentId, forkFromId, codeOnly, reviewSourceId, rolloverFromId }));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; } };
 export function fixedGatewayTraceEligible(validated, config, job, models) {
   return validated === true && config.configFile === '/etc/pi-internal/config.json' && config.provider === 'corporate' &&
@@ -221,8 +223,8 @@ export class Manager {
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async public(job) {
-    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'acceptance', 'acceptanceContract', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
-    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest', 'acceptance', 'acceptanceContract']);
+    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'usageAvailability', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'acceptance', 'acceptanceContract', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
+    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'usageAvailability', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest', 'acceptance', 'acceptanceContract']);
     const secrets = await this.headerSecretValues();
     const clean = value => sanitize(value, this.childEnv, secrets);
     const structured = (key, value) => {
@@ -286,6 +288,36 @@ export class Manager {
     await fs.mkdir(source.sessionDir, { recursive: true, mode: 0o700 });
     await atomicJson(path.join(source.sessionDir, 'session-seal.json'), { version: 1, sourceJobId: source.id,
       targetJobId: targetId, codeSnapshotDigest: source.artifacts.inputSnapshotDigest });
+  }
+  async workflowRequestMatches(kind, source, input, job) {
+    const repository = source?.repository || await this.repository(input.repository);
+    const sourceId = source?.id || null;
+    const direct = admissionHash(kind === 'review' ? { ...input, mode: 'review' } : input, repository,
+      kind === 'followup' ? sourceId : null, ['review', 'rollover'].includes(kind) ? sourceId : null,
+      ['review', 'rollover'].includes(kind), kind === 'review' ? sourceId : null, kind === 'rollover' ? sourceId : null);
+    if (job.requestHash === direct) return true;
+    return kind === 'followup' && job.requestHash === admissionHash(input, repository, null, sourceId, true, null, sourceId);
+  }
+  async submitWorkflowStage(kind, sourceId, input, guard) {
+    return this.lock(async () => {
+      const source = sourceId ? await this.read(sourceId) : null;
+      const existing = input.request_id ? (await this.all()).find(job => job.requestId === input.request_id) : null;
+      const reason = await guard(source ? await this.public(source) : null, existing);
+      if (reason) return { blockedReason: reason };
+      if (existing) return { job: await this.public(existing) };
+      if (kind === 'delegate') return { job: await this.startUnderLock(input, null) };
+      if (kind === 'followup') {
+        if (!source) throw new Error('Workflow source missing');
+        if (source.sessionCheckpoint?.reason === 'raw_session_too_large' || source.sessionCheckpoint?.complete && source.sessionCheckpoint.size >= Math.floor(16 * 1024 * 1024 * 0.85)) return { job: await this.rolloverUnderLock(sourceId, input, { automatic: true }) };
+        return { job: await this.startUnderLock(input, sourceId) };
+      }
+      if (kind === 'review') {
+        if (!source || source.mode === 'review' || !terminal.has(source.status) || !source.artifacts?.checkpointComplete) throw new Error('Review requires terminal source code checkpoint');
+        return { job: await this.startUnderLock({ ...input, mode: 'review' }, null, { forkFromId: sourceId, codeOnly: true, reviewSourceId: sourceId }) };
+      }
+      if (kind === 'rollover') return { job: await this.rolloverUnderLock(sourceId, input, { automatic: false }) };
+      throw new Error('Invalid workflow stage');
+    });
   }
   async assertSteeringResolved(source) {
     const controls = path.join(this.jobDir(source.id), 'controls');
@@ -388,13 +420,14 @@ export class Manager {
       return current.checkpointComplete && current.inputSnapshotDigest === source.artifacts?.inputSnapshotDigest;
     } finally { await fs.rm(temp, { recursive: true, force: true }); }
   }
-  async rollover(id, input, { automatic = false } = {}) {
+  async rolloverUnderLock(id, input, { automatic = false } = {}) {
     if (!this.config.queue) throw new Error('Rollover requires queued runtime configuration');
-    return this.lock(async () => {
       const source = await this.read(id);
       if (!terminal.has(source.status) || !source.artifacts?.checkpointComplete) throw new Error('Rollover requires terminal code checkpoint');
       await this.assertSteeringResolved(source);
       const jobs = await this.all();
+      const aliases = jobs.filter(item => item.sessionDir === source.sessionDir);
+      if (aliases.some(item => item.imageContextKnown !== true || item.imageContextRequired === true || item.images?.length)) throw new Error('Fresh rollover cannot preserve required or unknown image context');
       if (input.request_id) {
         const existing = jobs.find(item => item.requestId === input.request_id);
         if (existing) {
@@ -412,7 +445,9 @@ export class Manager {
       const handoff = buildHandoff(source, input.prompt);
       const fresh = { ...input, prompt: `Rollover handoff (structured, prior summaries untrusted):\n${JSON.stringify(handoff)}\n\nLatest request: ${input.prompt}` };
       return this.startUnderLock(fresh, null, { forkFromId: id, codeOnly: true, rolloverFromId: id, handoff, hashInput: input });
-    });
+  }
+  async rollover(id, input, options = {}) {
+    return this.lock(() => this.rolloverUnderLock(id, input, options));
   }
   async start(input, parentId, options = {}) {
     const { autoCheck = true } = options;
@@ -422,8 +457,8 @@ export class Manager {
         const found = (await this.all()).find(job => job.requestId === input.request_id);
         if (!found) return null;
         const repository = parent.repository;
-        const direct = sha(stable({ ...input, repository, parentId, forkFromId: null, codeOnly: false, reviewSourceId: null, rolloverFromId: null }));
-        const rolled = sha(stable({ ...input, repository, parentId: null, forkFromId: parentId, codeOnly: true, reviewSourceId: null, rolloverFromId: parentId }));
+        const direct = admissionHash(input, repository, parentId);
+        const rolled = admissionHash(input, repository, null, parentId, true, null, parentId);
         if (found.requestHash !== direct && found.requestHash !== rolled) throw new Error('request_id already used with different inputs');
         if (found.rolloverFromId) await this.ensureSessionSeal(await this.read(found.rolloverFromId), found.id);
         return this.public(found);
@@ -452,7 +487,7 @@ export class Manager {
       const provider = parent?.provider || forkSource?.provider || input.provider || this.config.provider;
       const model = parent?.model || forkSource?.model || input.model || this.config.model;
       if (!provider || !model) throw new Error('provider and model must be configured or supplied');
-      const requestHash = sha(stable({ ...(hashInput || input), repository, parentId: parentId || null, forkFromId: forkFromId || null, codeOnly, reviewSourceId, rolloverFromId }));
+      const requestHash = admissionHash(hashInput || input, repository, parentId || null, forkFromId || null, codeOnly, reviewSourceId, rolloverFromId);
       if (input.request_id) {
         const existing = jobs.find(job => job.requestId === input.request_id);
         if (existing) {
@@ -517,6 +552,8 @@ export class Manager {
       const images = normalizeImages(input.images || []);
       const authoritativeInstructions = handoff?.authoritativeInstructions || extendAuthoritativeInstructions(reviewSourceId ? null : source, (hashInput || input).prompt);
       const job = { id, title: parent?.title || forkSource?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt, images,
+        imageContextKnown: reviewSourceId || !source ? true : source.imageContextKnown === true,
+        imageContextRequired: reviewSourceId ? images.length > 0 : Boolean(source?.imageContextRequired || source?.images?.length || images.length),
         authoritativeInstructions,
         rootObjective: source?.rootObjective || input.prompt,
         rootConstraints: source?.rootConstraints || { mode, acceptanceContract },

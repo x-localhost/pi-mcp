@@ -6,8 +6,9 @@ export function extendAuthoritativeInstructions(source, latestRequest, { handoff
   const prior = source?.authoritativeInstructions || source?.handoff?.authoritativeInstructions ||
     (source ? [source.rootObjective || source.prompt, ...(source.prompt && source.prompt !== (source.rootObjective || source.prompt) ? [source.prompt] : [])] : []);
   if (!Array.isArray(prior)) throw new Error('Authoritative instructions invalid');
-  const instructions = [...prior, latestRequest].map(value => bounded(value, 'instructions', handoff ? 10000 : 100000));
-  if (instructions.length > 32 || Buffer.byteLength(JSON.stringify(instructions)) > (handoff ? 20000 : 256000)) throw new Error('Authoritative instructions too large');
+  const instructions = [...prior, latestRequest].map(value => handoff ? bounded(value, 'instructions', 10000) :
+    typeof value === 'string' && value.trim() && value.length <= 100000 ? value : (() => { throw new Error('Authoritative instructions missing or too large'); })());
+  if (instructions.length > 32 || Buffer.byteLength(JSON.stringify(instructions)) > (handoff ? 20000 : 1_000_000)) throw new Error('Authoritative instructions too large');
   return instructions;
 }
 export function buildHandoff(source, latestRequest) {
