@@ -145,3 +145,16 @@ or package/global edits. Each writer uses its own committed-base worktree.
 Parent retains final review, commits and remote regression; independent native
 Astra must review the corrected committed diff. Only clean verified integration
 may fast-forward local main.
+
+Corrective handoff: integration candidate `1c27ed55fc1f64b63443579992b7a4e4e1166bf4`
+(initial Sonnet work `0644560`), still unverified and not merged to main. Writer
+worktree `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-corrections`,
+branch `codex/evaluation/corrections`, based on that exact candidate. Before
+assignment native `/root/harness_runtime` (Sol) and `/root/harness_design` (Astra)
+are completed, bridge activeJobs=0 and GREEN job
+`task-25710c18-f17c-4e05-a51b-8cf9c6692fe8` terminal completed with no permission
+denials. Reuse native Sol for corrective implementation and native Astra for
+independent final review; no recursive delegation. Shared image is read-only
+`pi-harness-evaluation:20261024`; corrective remote root is
+`/tmp/pi-harness-evaluation-corrections-20261024`, with task-specific container
+names, no ports/providers. Parent will not run a competing test on that root.
