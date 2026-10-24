@@ -14,7 +14,7 @@ const manager = await new Manager(config, childEnv).init();
 await manager.ensureDispatcher();
 const mcpSecrets = config.approvedMcp.servers.flatMap(server => Object.values(server.env || {}));
 const server = new McpServer({ name: 'pi-mcp', version: '0.1.0' }, {
-  instructions: 'Start with pi_health. Delegation queues a bounded job from a committed ref. Poll pi_status and pi_events; pi_result is a preview and pi_artifacts/pi_read_artifact expose complete bounded exports. request_id makes retries idempotent. Followups reuse a terminal job worktree and session; forks use immutable terminal checkpoints in a new worktree. Review all changes before integration.'
+  instructions: 'Start with pi_health and pi_capabilities. Delegation queues a bounded job from a committed ref. Poll pi_status and pi_events; pi_result is a preview and pi_artifacts/pi_read_artifact expose complete bounded exports. request_id makes retries idempotent. Followups resume the current unsealed session or roll over long history into a fresh code-preserving session; forks use immutable terminal checkpoints. Inspect verification and acceptance separately and review all changes before integration.'
 });
 // Manager and artifact/event owners sanitize untrusted text before returning it.
 // Re-sanitizing the whole structured response can corrupt IDs, enum statuses,
@@ -64,7 +64,7 @@ server.registerTool('pi_cancel', {
   description: 'Request cancellation while preserving the worktree and artifacts.', inputSchema: { job_id: id }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
 }, wrap(args => manager.cancel(args.job_id)));
 server.registerTool('pi_followup', {
-  description: 'Continue a terminal job in its existing worktree and Pi session.', inputSchema: { job_id: id, ...task },
+  description: 'Continue the latest terminal job in its unsealed session, automatically using a fresh code-preserving session near the raw-history limit.', inputSchema: { job_id: id, ...task },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
 }, wrap(({ job_id, ...args }) => manager.start(args, job_id)));
 server.registerTool('pi_fork', {

@@ -300,3 +300,7 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   committed workflow, runs the full suite and isolated mock internal profile.
 - Evaluation remains blocked on the already pending narrow bridge Git permission
   decision; no substitute model or alternate execution route is authorized.
+- The completed tools agent could not be reactivated because the native service
+  reports its thread limit. The available runtime Sol will implement correction
+  units serially in their separate worktrees, with the same role/model and no
+  permission change. Astra separately reviews committed workflow recovery.
