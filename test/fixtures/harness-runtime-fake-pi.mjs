@@ -18,6 +18,12 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   else if (request.type === 'get_session_stats') send({ type: 'response', id: request.id, command: request.type, success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 } });
   else if (request.type === 'set_model') { model = { provider: request.provider, id: request.modelId, input: ['text'] }; send({ type: 'response', id: request.id, command: request.type, success: true, data: model }); }
   else if (request.type === 'abort') { send({ type: 'response', id: request.id, command: request.type, success: true }); process.exit(0); }
+  else if (request.type === 'steer') {
+    send({ type: 'response', id: request.id, command: request.type, success: true, data: { disposition: 'handled' } });
+    send({ type: 'turn_start' });
+    send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'steering complete' }], usage: { input: 1, output: 1 } } });
+    send({ type: 'agent_settled' });
+  }
   else if (request.type === 'clear_queue' || request.type === 'set_thinking_level') send({ type: 'response', id: request.id, command: request.type, success: true });
   else if (request.type === 'prompt') {
     send({ type: 'response', id: request.id, command: request.type, success: true, data: { disposition: 'started' } });
@@ -28,6 +34,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       await fs.writeFile(policy.activityFile, JSON.stringify({ version: 1, lastEventAt: new Date().toISOString(), lastProgressAt: new Date().toISOString(), consecutiveToolFailures: 3, lastKind: 'tool_end' }));
       continue;
     }
+    if (request.message.includes('[STEER_HOLD]')) continue;
+    if (request.message.includes('[CONTEXT_STOP]')) await fs.writeFile(policy.stopFile, JSON.stringify({ version: 1, reason: 'context_limit', at: new Date().toISOString() }));
     send({ type: 'turn_start' });
     send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'completed' }], usage: { input: 1, output: 1 } } });
     send({ type: 'agent_settled' });

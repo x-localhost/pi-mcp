@@ -30,11 +30,12 @@ test('oversized raw history preserves completed code/verification and supports c
   await fs.writeFile(configFile, JSON.stringify({ piPath: fake, stateDir: path.join(root, 'state'), allowedRoots: [root], provider: 'mock', model: 'mock',
     maxConcurrent: 2, defaultTimeoutSeconds: 15, maxTimeoutSeconds: 30, defaultMaxTurns: 3,
     queue: { maxPending: 8, maxWaitSeconds: 60, dispatchIntervalMs: 100 },
-    verification: { commands: [{ id: 'unit', argv: ['/usr/bin/true'], timeoutSeconds: 3, maxOutputBytes: 1000, readOnly: true }] },
+    verification: { commands: [{ id: 'unit', argv: ['/usr/bin/true'], timeoutSeconds: 3, maxOutputBytes: 1000, readOnly: true },
+      { id: 'slow', argv: ['/bin/sleep', '2'], timeoutSeconds: 4, maxOutputBytes: 1000, readOnly: true }] },
     observation: { idleTimeoutMs: 1200, consecutiveFailureLimit: 2 } }));
   const config = await loadConfig(configFile);
   const manager = await new Manager(config, buildChildEnv(config)).init();
-  const sourceStart = await manager.start({ repository, title: 'Oversize', prompt: 'Implement [OVERSIZE]', verification_ids: ['unit'],
+  const sourceStart = await manager.start({ repository, title: 'Oversize', prompt: 'Implement [OVERSIZE]', verification_ids: ['unit', 'slow'],
     acceptance: { version: 1, required_verification_ids: ['unit'], required_artifact_paths: ['code.txt'], require_review: true } });
   const source = await waitJob(manager, sourceStart.id);
   const sourcePrivate = await manager.read(source.id);
@@ -67,4 +68,30 @@ test('oversized raw history preserves completed code/verification and supports c
   const failure = await waitJob(manager, failureStart.id);
   assert.equal(failure.status, 'tool_failure_limit', JSON.stringify(failure));
   assert.equal(failure.artifacts.checkpointComplete, true);
+  const contextStart = await manager.start({ repository, title: 'Context stop', prompt: '[CONTEXT_STOP]' });
+  const context = await waitJob(manager, contextStart.id);
+  assert.equal(context.status, 'context_limit', JSON.stringify(context));
+  assert.equal(context.artifacts.checkpointComplete, true);
+});
+
+test('accepted steering text is authoritative in a later fresh rollover', { timeout: 30000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-harness-steer-ledger-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, 'repo'); await fs.mkdir(repository);
+  const git = (...args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+  await fs.writeFile(path.join(repository, 'base.txt'), 'base'); git('add', '.'); git('commit', '-qm', 'base');
+  await fs.chmod(fake, 0o755);
+  const configFile = path.join(root, 'config.json');
+  await fs.writeFile(configFile, JSON.stringify({ piPath: fake, stateDir: path.join(root, 'state'), allowedRoots: [root], provider: 'mock', model: 'mock',
+    maxConcurrent: 2, defaultTimeoutSeconds: 15, maxTimeoutSeconds: 30, defaultMaxTurns: 3, queue: { maxPending: 8, maxWaitSeconds: 60, dispatchIntervalMs: 100 } }));
+  const config = await loadConfig(configFile); const manager = await new Manager(config, buildChildEnv(config)).init();
+  const started = await manager.start({ repository, title: 'Steer', prompt: 'A [STEER_HOLD]' });
+  for (let i = 0; i < 80; i++) { const current = await manager.status(started.id); if (current.status === 'running' && current.sessionFile) break; await new Promise(resolve => setTimeout(resolve, 100)); }
+  const ack = await manager.steer(started.id, { message: 'Preserve C' });
+  assert.equal(ack.status, 'handled_by_pi');
+  const completed = await waitJob(manager, started.id);
+  assert.equal(completed.status, 'completed');
+  assert.deepEqual((await manager.read(started.id)).authoritativeInstructions, ['A [STEER_HOLD]', 'Preserve C']);
+  const rolled = await manager.rollover(started.id, { prompt: 'Continue' });
+  assert.deepEqual((await manager.read(rolled.id)).handoff.authoritativeInstructions, ['A [STEER_HOLD]', 'Preserve C', 'Continue']);
 });

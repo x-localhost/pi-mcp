@@ -15,7 +15,7 @@ import { scanState } from './storage.mjs';
 import { normalizeImages } from './images.mjs';
 import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts } from './artifacts.mjs';
 import { normalizeAcceptance, inheritAcceptance, evaluateAcceptance, contractDigest } from './acceptance.mjs';
-import { buildHandoff, shouldAutoRollover } from './session-transition.mjs';
+import { buildHandoff, extendAuthoritativeInstructions, shouldAutoRollover } from './session-transition.mjs';
 import { readWorkflowReferences } from './workflow.mjs';
 
 const exec = promisify(execFile);
@@ -150,6 +150,7 @@ export class Manager {
           await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job); changed = true; continue;
         }
         try {
+          if (job.parentJobId && (await this.sessionSealed(job.sessionDir) || jobs.some(item => item.rolloverFromId && jobs.find(source => source.id === item.rolloverFromId)?.sessionDir === job.sessionDir))) throw new Error('Source session sealed by rollover');
           if (await this.sourceConfigDigest() !== job.sourceConfigDigest) throw new Error('Queued model configuration changed before admission');
           if (await this.repository(job.repository) !== job.repository) throw new Error('Queued repository no longer allowed');
           await this.validateHeaders(job.provider, job.model);
@@ -280,6 +281,18 @@ export class Manager {
       return true;
     } finally { await handle.close(); }
   }
+  async ensureSessionSeal(source, targetId) {
+    if (await this.sessionSealed(source.sessionDir)) return;
+    await fs.mkdir(source.sessionDir, { recursive: true, mode: 0o700 });
+    await atomicJson(path.join(source.sessionDir, 'session-seal.json'), { version: 1, sourceJobId: source.id,
+      targetJobId: targetId, codeSnapshotDigest: source.artifacts.inputSnapshotDigest });
+  }
+  async assertSteeringResolved(source) {
+    const controls = path.join(this.jobDir(source.id), 'controls');
+    const names = await fs.readdir(controls).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
+    const accepted = new Set(source.authoritativeSteerIds || []);
+    if (names.some(name => /^processing-[0-9a-f-]{36}\.json$/.test(name) && !accepted.has(name.slice(11, -5)))) throw new Error('Steering delivery unresolved; fresh continuation would lose a possible instruction');
+  }
   async acceptanceFor(job) { return evaluateAcceptance(job, relative => this.sourcePathExists(job, relative)); }
   async attestReview(id, { review_job_id, verdict, request_id } = {}) {
     return this.lock(async () => {
@@ -290,6 +303,7 @@ export class Manager {
         review.status !== 'completed' || review.execution?.status !== 'passed' || review.verificationIds?.length && review.verification?.status !== 'passed') throw new Error('Review source, execution or verification mismatch');
       if (review.reviewSourceContractDigest !== contractDigest(source.acceptanceContract)) throw new Error('Review contract changed');
       if (!['approved', 'rejected'].includes(verdict)) throw new Error('Invalid review verdict');
+      if (verdict === 'approved' && !['accepted', 'not_requested'].includes((await this.acceptanceFor(review)).status)) throw new Error('Review acceptance incomplete');
       required(request_id, 'request_id', 100);
       const evidence = { authority: 'caller', verdict, reviewJobId: review_job_id, sourceJobId: id,
         inputSnapshotDigest: source.artifacts.inputSnapshotDigest, contractDigest: contractDigest(source.acceptanceContract), manifestSha256: source.artifacts.manifestSha256,
@@ -299,7 +313,8 @@ export class Manager {
         if (existing.verdict !== verdict || existing.reviewJobId !== review_job_id) throw new Error('request_id already used with different attestation');
         return { ...existing, acceptance: await this.acceptanceFor(source) };
       }
-      source.reviewAttestations = [...(source.reviewAttestations || []), evidence].slice(-32);
+      if ((source.reviewAttestations || []).length >= 32) throw new Error('Review attestation capacity reached');
+      source.reviewAttestations = [...(source.reviewAttestations || []), evidence];
       source.acceptance = await this.acceptanceFor(source);
       await atomicJson(path.join(this.jobDir(id), 'job.json'), source);
       return { ...evidence, acceptance: source.acceptance };
@@ -378,7 +393,18 @@ export class Manager {
     return this.lock(async () => {
       const source = await this.read(id);
       if (!terminal.has(source.status) || !source.artifacts?.checkpointComplete) throw new Error('Rollover requires terminal code checkpoint');
+      await this.assertSteeringResolved(source);
       const jobs = await this.all();
+      if (input.request_id) {
+        const existing = jobs.find(item => item.requestId === input.request_id);
+        if (existing) {
+          const expected = sha(stable({ ...input, repository: source.repository, parentId: null, forkFromId: id, codeOnly: true, reviewSourceId: null, rolloverFromId: id }));
+          if (existing.requestHash !== expected) throw new Error('request_id already used with different inputs');
+          await this.ensureSessionSeal(source, existing.id);
+          return this.public(existing);
+        }
+      }
+      if (jobs.some(item => item.id !== id && (item.sessionDir === source.sessionDir || item.worktree === source.worktree) && (active.has(item.status) || item.status === 'queued'))) throw new Error('Rollover source has active or queued alias');
       const latestTip = !jobs.some(item => item.id !== id && item.worktree === source.worktree && item.createdAt > source.createdAt);
       if (automatic && await this.sessionSealed(source.sessionDir)) throw new Error('Source session sealed by rollover');
       if (automatic && !shouldAutoRollover(source, { latestTip, codeMatches: latestTip && await this.currentSnapshotMatches(source) })) throw new Error('Automatic rollover requires latest matching code snapshot');
@@ -399,6 +425,7 @@ export class Manager {
         const direct = sha(stable({ ...input, repository, parentId, forkFromId: null, codeOnly: false, reviewSourceId: null, rolloverFromId: null }));
         const rolled = sha(stable({ ...input, repository, parentId: null, forkFromId: parentId, codeOnly: true, reviewSourceId: null, rolloverFromId: parentId }));
         if (found.requestHash !== direct && found.requestHash !== rolled) throw new Error('request_id already used with different inputs');
+        if (found.rolloverFromId) await this.ensureSessionSeal(await this.read(found.rolloverFromId), found.id);
         return this.public(found);
       });
       if (existing) return existing;
@@ -430,6 +457,7 @@ export class Manager {
         const existing = jobs.find(job => job.requestId === input.request_id);
         if (existing) {
           if (existing.requestHash !== requestHash) throw new Error('request_id already used with different inputs');
+          if (existing.rolloverFromId) await this.ensureSessionSeal(await this.read(existing.rolloverFromId), existing.id);
           return await this.public(existing);
         }
         const tombstone = await fs.readFile(path.join(this.config.stateDir, 'request-ids', sha(input.request_id) + '.json'), 'utf8').then(JSON.parse, error => error.code === 'ENOENT' ? null : Promise.reject(error));
@@ -478,6 +506,7 @@ export class Manager {
       if ((parent || forkSource) && input.materials !== undefined && stable(input.materials) !== stable((parent || forkSource).materials || [])) throw new Error('Continuation materials must match source selection');
       const materials = (parent || forkSource)?.materials || input.materials || [];
       const source = parent || forkSource;
+      if (source && !reviewSourceId) await this.assertSteeringResolved(source);
       const acceptanceContract = reviewSourceId ? normalizeAcceptance(input.acceptance) : inheritAcceptance(source?.acceptanceContract, input.acceptance);
       if (reviewSourceId && acceptanceContract?.require_review) throw new Error('Review cannot require recursive review');
       const verificationIds = input.verification_ids ?? (reviewSourceId ? [] : source?.verificationIds || []);
@@ -486,7 +515,9 @@ export class Manager {
       if (acceptanceContract?.required_verification_ids.some(id => !verificationIds.includes(id))) throw new Error('Acceptance requires selected verifier IDs');
       if (mode === 'review' && verificationIds.some(id => !this.config.verification.commands.find(item => item.id === id).readOnly)) throw new Error('Review verifier requires administrator readOnly declaration');
       const images = normalizeImages(input.images || []);
+      const authoritativeInstructions = handoff?.authoritativeInstructions || extendAuthoritativeInstructions(reviewSourceId ? null : source, (hashInput || input).prompt);
       const job = { id, title: parent?.title || forkSource?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt, images,
+        authoritativeInstructions,
         rootObjective: source?.rootObjective || input.prompt,
         rootConstraints: source?.rootConstraints || { mode, acceptanceContract },
         mode, provider, model, thinkingLevel: parent?.thinkingLevel || input.thinking_level || this.config.thinkingLevel,
@@ -505,7 +536,7 @@ export class Manager {
         const tombstones = path.join(this.config.stateDir, 'request-ids'); await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
         await fs.writeFile(path.join(tombstones, sha(input.request_id) + '.json'), JSON.stringify({ id, requestHash, createdAt: job.createdAt }), { flag: 'wx', mode: 0o600 });
       }
-      if (rolloverFromId) await atomicJson(path.join(forkSource.sessionDir, 'session-seal.json'), { version: 1, sourceJobId: rolloverFromId, targetJobId: id, codeSnapshotDigest: forkSource.artifacts.inputSnapshotDigest });
+      if (rolloverFromId) await this.ensureSessionSeal(forkSource, id);
       try {
         if (this.config.queue) { await this.ensureDispatcher(); return { ...await this.public(job), artifactsDir: dir }; }
         if (!parent) await git(repository, ['worktree', 'add', '-b', branch, worktree, baseCommit], false, this.childEnv);
@@ -579,6 +610,10 @@ export class Manager {
       }
       if (dry_run) return { dryRun: true, candidates: candidates.map(job => job.id), refused };
       if (refused.length) throw new Error(`Cleanup refused: ${JSON.stringify(refused)}`);
+      for (const job of candidates.filter(item => item.rolloverFromId)) {
+        const source = jobs.find(item => item.id === job.rolloverFromId);
+        if (source && !ids.has(source.id)) await this.ensureSessionSeal(source, job.id);
+      }
       const sessionsRoot = path.join(this.config.stateDir, 'sessions');
       const sessions = new Set(candidates.map(job => job.sessionDir));
       for (const sessionDir of sessions) {

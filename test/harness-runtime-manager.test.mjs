@@ -99,3 +99,90 @@ test('internal gateway trace requires validated profile, selected provider and e
   assert.equal(fixedGatewayTraceEligible(true, config, { ...job, model: 'other' }, models), false);
   assert.equal(fixedGatewayTraceEligible(true, config, job, { providers: { corporate: { ...models.providers.corporate, baseUrl: 'https://other.example/v1' } } }), false);
 });
+
+test('rollover rejects pending or running session aliases and dispatch rechecks a newly sealed session', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = await manager.start({ repository, title: 'Task', prompt: 'A' }); await manager.dispatchOnce();
+  const source = await manager.read(first.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' }, sessionCheckpoint: { complete: true, size: 10 } }); await write(source);
+  const sibling = await manager.start({ prompt: 'B' }, source.id);
+  await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /active|queued|pending/i);
+  const queued = await manager.read(sibling.id); queued.status = 'running'; await write(queued);
+  await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /active|queued|pending/i);
+  queued.status = 'queued'; await write(queued);
+  await fs.writeFile(path.join(source.sessionDir, 'session-seal.json'), JSON.stringify({ version: 1, sourceJobId: source.id, targetJobId: sibling.id, codeSnapshotDigest: digest }));
+  await manager.dispatchOnce();
+  assert.equal((await manager.read(sibling.id)).status, 'failed');
+  assert.match((await manager.read(sibling.id)).error, /sealed/);
+});
+
+test('rollover retry and cleanup repair a missing durable seal', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = await manager.start({ repository, title: 'Task', prompt: 'A' }); await manager.dispatchOnce();
+  const source = await manager.read(first.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
+  const input = { prompt: 'Continue', request_id: 'repair-seal' };
+  const child = await manager.rollover(source.id, input);
+  await fs.rm(path.join(source.sessionDir, 'session-seal.json'));
+  assert.equal((await manager.rollover(source.id, input)).id, child.id);
+  assert.equal(await manager.sessionSealed(source.sessionDir), true);
+  const childRaw = await manager.read(child.id); childRaw.status = 'completed'; childRaw.execution = { status: 'passed' }; await write(childRaw);
+  await fs.rm(path.join(source.sessionDir, 'session-seal.json'));
+  const removed = await manager.cleanup({ job_ids: [child.id], dry_run: false });
+  assert.deepEqual(removed.removed, [child.id]);
+  assert.equal(await manager.sessionSealed(source.sessionDir), true);
+  await assert.rejects(manager.start({ prompt: 'Old alias' }, source.id), /sealed/);
+});
+
+test('reviewer acceptance must pass and attestation history fails closed at capacity', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = await manager.start({ repository, title: 'Task', prompt: 'A', acceptance: { version: 1, require_review: true } }); await manager.dispatchOnce();
+  const source = await manager.read(first.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
+  const reviewStart = await manager.review(first.id, { prompt: 'Review', acceptance: { version: 1, required_artifact_paths: ['missing.txt'] } });
+  const review = await manager.read(reviewStart.id); Object.assign(review, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'review-manifest' } }); await write(review);
+  await assert.rejects(manager.attestReview(first.id, { review_job_id: review.id, verdict: 'approved', request_id: 'bad-review' }), /review.*acceptance/i);
+  review.acceptanceContract = null; await write(review);
+  for (let index = 0; index < 32; index++) await manager.attestReview(first.id, { review_job_id: review.id, verdict: index === 31 ? 'rejected' : 'approved', request_id: `receipt-${index}` });
+  assert.equal((await manager.status(first.id)).acceptance.status, 'review_rejected');
+  await assert.rejects(manager.attestReview(first.id, { review_job_id: review.id, verdict: 'approved', request_id: 'receipt-overflow' }), /capacity|full/i);
+  assert.equal((await manager.attestReview(first.id, { review_job_id: review.id, verdict: 'approved', request_id: 'receipt-0' })).acceptance.status, 'review_rejected');
+});
+
+test('ordinary continuation ledger survives a later fresh rollover', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = await manager.start({ repository, title: 'Task', prompt: 'A' }); await manager.dispatchOnce();
+  const source = await manager.read(first.id); const firstDigest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: firstDigest, manifestSha256: 'manifest' } }); await write(source);
+  const follow = await manager.start({ prompt: 'B; preserve C' }, source.id);
+  assert.deepEqual((await manager.read(follow.id)).authoritativeInstructions, ['A', 'B; preserve C']);
+  await manager.dispatchOnce();
+  const followRaw = await manager.read(follow.id); const followDigest = await checkpoint(followRaw);
+  Object.assign(followRaw, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: followDigest, manifestSha256: 'manifest' } }); await write(followRaw);
+  const rolled = await manager.rollover(follow.id, { prompt: 'Continue' });
+  const result = await manager.read(rolled.id);
+  assert.deepEqual(result.handoff.authoritativeInstructions, ['A', 'B; preserve C', 'Continue']);
+  assert.deepEqual(result.authoritativeInstructions, result.handoff.authoritativeInstructions);
+});
+
+test('ambiguous steering delivery blocks fresh continuation', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = await manager.start({ repository, title: 'Task', prompt: 'A' }); await manager.dispatchOnce();
+  const source = await manager.read(first.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
+  const controls = path.join(manager.jobDir(source.id), 'controls'); await fs.mkdir(controls);
+  await fs.writeFile(path.join(controls, 'processing-00000000-0000-4000-8000-000000000001.json'), JSON.stringify({ id: '00000000-0000-4000-8000-000000000001', message: 'Possibly delivered' }));
+  await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /steering.*unresolved/i);
+  await assert.rejects(manager.start({ prompt: 'Continue raw' }, source.id), /steering.*unresolved/i);
+  const review = await manager.review(source.id, { prompt: 'Inspect immutable code only' });
+  assert.equal((await manager.read(review.id)).codeOnly, true);
+});
+
+test('ordinary 10001 character task remains admissible but rollover refuses oversized handoff', async t => {
+  const { root, repository, manager, write, checkpoint } = await fixture(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const started = await manager.start({ repository, title: 'Long task', prompt: 'A'.repeat(10001) });
+  await manager.dispatchOnce();
+  const source = await manager.read(started.id); const digest = await checkpoint(source);
+  Object.assign(source, { status: 'completed', execution: { status: 'passed' }, artifacts: { checkpointComplete: true, inputSnapshotDigest: digest, manifestSha256: 'manifest' } }); await write(source);
+  await assert.rejects(manager.rollover(source.id, { prompt: 'Continue' }), /too large/);
+});

@@ -18,3 +18,10 @@ test('auto rollover applies only to latest matching code tip near raw limit', ()
   assert.equal(shouldAutoRollover(source, { latestTip: false, codeMatches: true }), false);
   assert.equal(shouldAutoRollover(source, { latestTip: true, codeMatches: false }), false);
 });
+
+test('rollover carries every authoritative continuation instruction and rejects overflow', () => {
+  const source = { id: 'task-source', rootObjective: 'A', prompt: 'B', authoritativeInstructions: ['A', 'B', 'Preserve C'], artifacts: { inputSnapshotDigest: 'abc' } };
+  const handoff = buildHandoff(source, 'Continue');
+  assert.deepEqual(handoff.authoritativeInstructions, ['A', 'B', 'Preserve C', 'Continue']);
+  assert.throws(() => buildHandoff({ ...source, authoritativeInstructions: ['A', 'x'.repeat(21000)] }, 'Continue'), /instructions.*too large/i);
+});

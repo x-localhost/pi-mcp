@@ -15,6 +15,7 @@ import { runVerifier, evaluateVerification, reconcileFinalSnapshot } from './ver
 import { appendJobEvent } from './events.mjs';
 import { normalizeImages, modelSupportsImages } from './images.mjs';
 import { POLICY_READY_TIMEOUT_MS } from './approved-mcp.mjs';
+import { extendAuthoritativeInstructions } from './session-transition.mjs';
 
 process.umask(0o077);
 const exec = promisify(execFile);
@@ -26,7 +27,7 @@ let saveChain = Promise.resolve();
 const save = () => { const snapshot = structuredClone(job); saveChain = saveChain.then(() => atomicJson(jobFile, snapshot)); return saveChain; };
 const now = () => new Date().toISOString();
 const sessionRoot = await fs.realpath(job.sessionDir);
-let child, rpc, stopping, finalText = '', settled = false, finalStopReason, providerError = '', stderrChunks = [], stderrBytes = 0, stderrOverflow = false;
+let child, rpc, stopping, finalText = '', settled = false, piActive = false, finalStopReason, providerError = '', stderrChunks = [], stderrBytes = 0, stderrOverflow = false;
 let eventChain = Promise.resolve(), usageBaseline = null, stopPromise;
 const seenObservationIds = new Set();
 const secretValues = [];
@@ -203,7 +204,7 @@ async function run() {
       }
       emitEvent({ type: 'message_end', stopReason: finalStopReason, textBytes: Buffer.byteLength(text) });
     }
-    if (event.type === 'agent_settled') settled = true;
+    if (event.type === 'agent_settled') { settled = true; piActive = false; }
     if (event.type === 'auto_retry_end' && event.success === true) providerError = '';
     if (event.type === 'error' || event.type === 'provider_error') {
       providerError = clean(event.message || event.error || 'Provider error');
@@ -242,12 +243,14 @@ async function run() {
   if (stopping) throw new Error(`Stopped during startup: ${stopping}`);
   const settledPromise = rpc.waitFor('agent_settled', (job.timeoutSeconds + 10) * 1000);
   settledPromise.catch(() => {});
+  piActive = true;
   const prompt = await rpc.request('prompt', { message: `${job.prompt}\n\nInspect worktree AGENTS.md with the confined read tool before modifying files. Work only in ${job.worktree}.`, ...(job.images?.length ? { images: job.images } : {}) });
   if (prompt.data?.disposition !== 'started') throw new Error(`Unsupported prompt disposition: ${prompt.data?.disposition}`);
   let watcher;
   try {
     await Promise.race([settledPromise, new Promise(resolve => { watcher = setInterval(() => { if (stopping || child.exitCode !== null || child.signalCode !== null) resolve(); }, 100); })]);
   } finally { clearInterval(watcher); }
+  piActive = false;
   if (fatal) throw fatal;
   if (!settled && !stopping) throw new Error('Pi exited before agent_settled');
   if (!stopping && (providerError || !['stop', 'end_turn'].includes(finalStopReason))) throw new Error(providerError || `Final stop reason: ${finalStopReason || 'missing'}`);
@@ -295,6 +298,7 @@ async function observedSessionUsage() {
   checkBudget();
 }
 async function finalizeOnce() {
+  piActive = false;
   job.status = 'finalizing'; job.heartbeatAt = now(); await save();
   await observedSessionUsage();
   const outcome = job.piIdentity ? await (stopPromise || stopOwnedGroup(job.piIdentity, 500)) : job.piPid ? { state: 'ambiguous' } : { state: 'stopped' };
@@ -402,17 +406,26 @@ async function pumpControls() {
       const ack = path.join(controls, `ack-${control.id}.json`);
       await atomicJson(ack, { id: control.id, status: 'received' });
       await emitEvent({ type: 'steer', controlId: control.id, status: 'received' });
+      let delivered = false;
       try {
         if (control.images?.length && !job.modelInputImageSupported) throw new Error('Selected model does not support images');
         const images = normalizeImages(control.images || []);
+        const authoritativeInstructions = extendAuthoritativeInstructions(job, control.message);
+        delivered = true;
         const response = await rpc.request('steer', { message: control.message, ...(images.length ? { images } : {}) }, 3000);
         const disposition = response.data?.disposition;
         if (!['queued', 'handled'].includes(disposition)) throw new Error('Unsupported steer disposition');
         const status = disposition === 'queued' ? 'queued_by_pi' : 'handled_by_pi';
-        await fs.rm(path.join(controls, processing), { force: true });
+        job.authoritativeInstructions = authoritativeInstructions;
+        job.authoritativeSteerIds = [...(job.authoritativeSteerIds || []), control.id];
+        await save();
         await atomicJson(ack, { id: control.id, status, disposition });
+        await fs.rm(path.join(controls, processing), { force: true });
         await emitEvent({ type: 'steer', controlId: control.id, status });
-      } catch { await fs.rm(path.join(controls, processing), { force: true }); await atomicJson(ack, { id: control.id, status: 'unknown' }); await emitEvent({ type: 'steer', controlId: control.id, status: 'unknown' }); }
+      } catch {
+        if (!delivered) await fs.rm(path.join(controls, processing), { force: true });
+        await atomicJson(ack, { id: control.id, status: 'unknown' }); await emitEvent({ type: 'steer', controlId: control.id, status: 'unknown' });
+      }
       const receipts = (await fs.readdir(controls)).filter(value => /^ack-[0-9a-f-]{36}\.json$/.test(value)).sort();
       for (const stale of receipts.slice(0, Math.max(0, receipts.length - 100))) await fs.rm(path.join(controls, stale), { force: true });
     }
@@ -465,8 +478,8 @@ async function consumeObservation() {
     if (policyStop.version !== 1 || !map[policyStop.reason]) throw new Error('Policy stop invalid');
     await stop(map[policyStop.reason]);
   }
-  if (!stopping && runtime.observation?.idleTimeoutMs > 0 && Date.now() - Date.parse(job.lastProgressAt || job.startedAt) > runtime.observation.idleTimeoutMs) await stop('idle_timeout');
-  if (!stopping && runtime.observation?.consecutiveFailureLimit > 0 && job.observation?.consecutiveToolFailures >= runtime.observation.consecutiveFailureLimit) await stop('tool_failure_limit');
+  if (piActive && !stopping && runtime.observation?.idleTimeoutMs > 0 && Date.now() - Date.parse(job.lastProgressAt || job.startedAt) > runtime.observation.idleTimeoutMs) await stop('idle_timeout');
+  if (piActive && !stopping && runtime.observation?.consecutiveFailureLimit > 0 && job.observation?.consecutiveToolFailures >= runtime.observation.consecutiveFailureLimit) await stop('tool_failure_limit');
 }
 let watchdogClosing = false, watchdogActive = null;
 const watchdog = setInterval(() => {

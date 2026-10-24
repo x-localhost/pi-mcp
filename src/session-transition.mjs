@@ -2,12 +2,21 @@ const bounded = (value, field, max) => {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) throw new Error(`Rollover ${field} missing or too large`);
   return value;
 };
+export function extendAuthoritativeInstructions(source, latestRequest, { handoff = false } = {}) {
+  const prior = source?.authoritativeInstructions || source?.handoff?.authoritativeInstructions ||
+    (source ? [source.rootObjective || source.prompt, ...(source.prompt && source.prompt !== (source.rootObjective || source.prompt) ? [source.prompt] : [])] : []);
+  if (!Array.isArray(prior)) throw new Error('Authoritative instructions invalid');
+  const instructions = [...prior, latestRequest].map(value => bounded(value, 'instructions', handoff ? 10000 : 100000));
+  if (instructions.length > 32 || Buffer.byteLength(JSON.stringify(instructions)) > (handoff ? 20000 : 256000)) throw new Error('Authoritative instructions too large');
+  return instructions;
+}
 export function buildHandoff(source, latestRequest) {
   const rootJobId = source.lineage?.rootJobId || source.id;
   const depth = (source.lineage?.depth || 0) + 1;
   if (depth > 100) throw new Error('Rollover lineage too deep');
   const objective = bounded(source.rootObjective || source.handoff?.objective || source.prompt, 'objective', 10000);
   const request = bounded(latestRequest, 'latest request', 10000);
+  const authoritativeInstructions = extendAuthoritativeInstructions(source, request, { handoff: true });
   const constraints = { original: source.rootConstraints || source.handoff?.constraints || { mode: source.mode || 'implement' },
     currentAcceptance: source.acceptanceContract || null };
   if (Buffer.byteLength(JSON.stringify(constraints)) > 8000) throw new Error('Rollover constraints too large');
@@ -18,7 +27,7 @@ export function buildHandoff(source, latestRequest) {
     ...(source.verification?.status && !['passed', 'not_requested'].includes(source.verification.status) ? [`Verification: ${source.verification.status}`] : []),
     ...(source.acceptance?.status && !['accepted', 'not_requested'].includes(source.acceptance.status) ? [`Acceptance: ${source.acceptance.status}`] : [])])];
   if (pending.length > 32 || Buffer.byteLength(JSON.stringify(pending)) > 20000) throw new Error('Rollover pending items too large');
-  return { version: 1, objective, constraints, latestRequest: request,
+  return { version: 1, objective, constraints, latestRequest: request, authoritativeInstructions,
     verified: { execution: source.execution?.status || null, verification: source.verification?.status || null, acceptance: source.acceptance?.status || null },
     pending,
     lineage: { rootJobId, parentJobId: source.id, depth, codeSnapshotDigest: source.artifacts.inputSnapshotDigest },
