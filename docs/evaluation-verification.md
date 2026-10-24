@@ -106,3 +106,48 @@ An additional before-fix run selected
 file. Observed **0/2 passed, 2 failed**: stale run locking blocked recovery, and
 the real Manager/fake-Pi result had no replayable trace. These failures preceded
 the corresponding state/evidence implementation changes.
+
+## Committed checkpoint `9d37008`
+
+Sol's first corrective unit was committed as `edb4694` and integrated as
+`8c2f643`; subsequent plan-only checkpoint `9d370081e3c4f64b3c408cbdde23da8848162719`
+has tree `7140d11cb97c2f6a868b8d8083b464c7f26481a6`. Its focused gram suite passed
+55/55, no failures/skips/cancellations, 8326.66883ms. This includes the configured
+fake-Pi CLI live bundle and offline replay. The [unit report](harness-evals-corrections-report.md)
+separates before-fix RED runs from later integration test additions.
+
+Parent transferred the exact committed Git archive to gram and ran all tests in
+the pinned image with network none, UID0, 2 CPUs, 2GiB and PID limit512. Runtime,
+internal-agent and package/lock files are unchanged from the main base. The
+packaged approved-MCP fixture was copied to `/app/approved-mcp/mock.mjs`, linked
+at `/app/approved-mcp/link`, and made root-owned 0555 for these disposable tests.
+Command: `timeout 540s node --test --test-concurrency=1 test/*.test.mjs`.
+Observed **377/377**, 15 suites, failed/cancelled/skipped0, exit0,
+271423.535085ms. The exact Docker command is retained as `run-full-regression.sh`.
+
+Parent replayed baseline, regressed and incomplete synthetic fixtures through the
+CLI, repeated baseline byte-for-byte with `cmp`, then compared baseline against
+regressed. A separate inspection script asserted each expected failure category:
+
+- Baseline: 3/10 successful, 9 observed and 1 missing outcome. The seven
+  unsuccessful cases are intentional negative/unknown fixtures.
+- Regressed: 2/10; only `fix-null-check` changes from success to unsuccessful.
+  Incomplete: 2/10, with an explicit observed `execution_incomplete` outcome.
+- File preservation: retained1/lost1 of2; submission idempotency:
+  correct1/incorrect1/unknown1 of3.
+- Synthetic latency/tokens/cost: 8 observed and 2 unknown of10; means4200ms,
+  1200tokens and USD0.02 are fixture constants, not provider measurements.
+  Matched comparison coverage8 and numerical deltas0 for these fixed values.
+- Repeated baseline JSON is identical. Output reports are 0600 and were created
+  exclusively. Fixture commits `111…`/`222…` and fingerprint `333…` are explicitly
+  synthetic placeholders; executed grader provenance is the committed source above.
+
+Evidence was preserved under
+`/tmp/pi-harness-evaluation-final-20261024/evidence/checkpoint-9d37008` (reports,
+summary, commands, inspection script, regression log/exit and source/image metadata).
+
+Independent Astra review did **not** approve this checkpoint: five evaluator
+correctness gaps remain, described in [evaluation-review.md](evaluation-review.md).
+The complete suite pass does not establish coverage of those newly found cases.
+A dedicated Sol review-fixes unit is adding the missing RED regressions; final
+review, committed verification and main integration remain pending.
