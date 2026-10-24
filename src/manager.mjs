@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
@@ -12,18 +13,26 @@ import { applyOfflineMaterials } from './offline-materials.mjs';
 import { identityState, groupState, stopOwnedGroup } from './ownership.mjs';
 import { scanState } from './storage.mjs';
 import { normalizeImages } from './images.mjs';
-import { listArtifacts, readArtifact, restoreCheckpoint } from './artifacts.mjs';
+import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts } from './artifacts.mjs';
+import { normalizeAcceptance, inheritAcceptance, evaluateAcceptance, contractDigest } from './acceptance.mjs';
+import { buildHandoff, shouldAutoRollover } from './session-transition.mjs';
 
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const active = new Set(['starting', 'running', 'finalizing', 'quarantined']);
-const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable']);
+const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'context_limit', 'idle_timeout', 'tool_failure_limit']);
 const idPattern = /^task-[0-9a-f-]{36}$/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
 const sha = value => createHash('sha256').update(value).digest('hex');
 const stable = value => JSON.stringify(value, (_key, item) => item && !Array.isArray(item) && typeof item === 'object' ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; } };
+export function fixedGatewayTraceEligible(validated, config, job, models) {
+  return validated === true && config.configFile === '/etc/pi-internal/config.json' && config.provider === 'corporate' &&
+    job.provider === 'corporate' && job.model === config.model && config.modelsFile === '/etc/pi-internal/models.json' &&
+    models?.providers?.corporate?.baseUrl === 'http://127.0.0.1:18080/v1' && models.providers.corporate.api === 'openai-completions' &&
+    models.providers.corporate.models?.length === 1 && models.providers.corporate.models[0].id === job.model;
+}
 
 export async function atomicJson(file, value) {
   const temp = `${file}.${randomUUID()}.tmp`;
@@ -81,6 +90,7 @@ export class Manager {
     const configFile = this.config.configFile || process.env.PI_MCP_CONFIG;
     if (!configFile) throw new Error('Queued dispatcher requires a configuration file');
     const dispatcherEnv = { ...this.childEnv, PI_MCP_CONFIG: configFile };
+    if (process.env.PI_INTERNAL_GATEWAY_VALIDATED === '1' && configFile === '/etc/pi-internal/config.json') dispatcherEnv.PI_INTERNAL_GATEWAY_VALIDATED = '1';
     // The dispatcher loads configuration again. Preserve only the already
     // validated values needed to resolve named proxy selectors on that pass.
     for (const [field, target] of [['httpProxyEnv', 'HTTP_PROXY'], ['httpsProxyEnv', 'HTTPS_PROXY'], ['allProxyEnv', 'ALL_PROXY'], ['noProxyEnv', 'NO_PROXY']]) {
@@ -97,19 +107,23 @@ export class Manager {
     const verifierIds = job.verificationIds || [];
     const verification = verifierIds.map(id => this.config.verification?.commands?.find(item => item.id === id));
     return { allowedCommands: this.config.allowedCommands || [], approvedMcp: this.config.approvedMcp || { servers: [] }, materials, verification,
-      artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, mode: job.mode, provider: job.provider, model: job.model,
+      artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, context: this.config.context || {}, observation: this.config.observation || {}, mode: job.mode, provider: job.provider, model: job.model,
       allowedRoots: this.config.allowedRoots, piPath: this.config.piPath, piArgs: this.config.piArgs || [], envAllowlist: this.config.envAllowlist || [],
       network: this.config.network || {}, agentDir: this.config.agentDir || null, modelsFile: this.config.modelsFile || null, authFile: this.config.authFile || null };
   }
   async launchWorker(job) {
     const dir = this.jobDir(job.id);
     await this.seedAgent();
+    const models = await this.loadAgentJson('models.json', this.config.modelsFile);
+    const traceInternalGateway = fixedGatewayTraceEligible(process.env.PI_INTERNAL_GATEWAY_VALIDATED === '1', this.config, job, models);
     await atomicJson(path.join(dir, 'runtime.json'), { piPath: this.config.piPath, piArgs: this.config.piArgs || [],
       agentDir: this.agentDir, allowedCommands: this.config.allowedCommands || [], policyExtension: path.join(codeRoot, 'src', 'policy-extension.mjs'),
       ownedModelsRequired: !!await fs.stat(path.join(this.agentDir, 'models.json')).then(() => true, () => false),
       ownedAuthRequired: !!await fs.stat(path.join(this.agentDir, 'auth.json')).then(() => true, () => false),
       configFile: this.config.configFile || process.env.PI_MCP_CONFIG || null,
-      verification: this.config.verification || { commands: [] }, artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, approvedMcp: this.config.approvedMcp || { servers: [] } });
+      verification: this.config.verification || { commands: [] }, artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, approvedMcp: this.config.approvedMcp || { servers: [] },
+      context: this.config.context || {}, observation: this.config.observation || {},
+      traceInternalGateway });
     if (this.spawnWorker) {
       const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'worker.mjs'), dir], {
         cwd: codeRoot, detached: true, stdio: 'ignore', env: { ...this.childEnv, PI_CODING_AGENT_DIR: this.agentDir }
@@ -156,6 +170,7 @@ export class Manager {
             const sourceDir = this.jobDir(job.forkJobId);
             const restored = await restoreCheckpoint({ jobDir: sourceDir, worktree: job.worktree, env: this.childEnv });
             job.inputSnapshotDigest = restored.inputSnapshotDigest;
+            if (!job.codeOnly) {
             const source = await this.read(job.forkJobId);
             if (!source.sessionCheckpoint?.complete) throw new Error('Source session checkpoint incomplete');
             const sourceFile = path.join(sourceDir, 'private-session', 'session.jsonl');
@@ -167,6 +182,7 @@ export class Manager {
             if (sha(bytes) !== source.sessionCheckpoint.sha256) throw new Error('Source session checkpoint digest mismatch');
             const forkDir = path.join(this.jobDir(job.id), 'fork-input'); await fs.mkdir(forkDir, { mode: 0o700 });
             job.forkSessionFile = path.join(forkDir, 'session.jsonl'); await fs.writeFile(job.forkSessionFile, bytes, { flag: 'wx', mode: 0o600 });
+            }
           }
           job.status = 'starting'; job.admittedAt = now(); await atomicJson(path.join(this.jobDir(job.id), 'job.json'), job);
           await this.launchWorker(job); capacity--; changed = true;
@@ -203,8 +219,8 @@ export class Manager {
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async public(job) {
-    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
-    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest']);
+    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'acceptance', 'acceptanceContract', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
+    const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest', 'acceptance', 'acceptanceContract']);
     const secrets = await this.headerSecretValues();
     const clean = value => sanitize(value, this.childEnv, secrets);
     const structured = (key, value) => {
@@ -218,8 +234,75 @@ export class Manager {
       } else if (key === 'execution' && typeof copy.stopReason === 'string' && !['stop', 'end_turn', 'error', 'aborted'].includes(copy.stopReason)) copy.stopReason = clean(copy.stopReason);
       return copy;
     };
+    job.acceptance = terminal.has(job.status) ? await this.acceptanceFor(job) : job.acceptanceContract ? { status: 'pending_execution', contractDigest: contractDigest(job.acceptanceContract) } : { status: 'not_requested' };
     return Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key,
       trusted.has(key) ? job[key] : ['execution', 'verification', 'artifacts', 'sessionCheckpoint', 'budget'].includes(key) ? structured(key, job[key]) : clean(job[key])]));
+  }
+  async sourcePathExists(job, relative) {
+    const file = path.join(this.jobDir(job.id), 'artifacts', 'private', 'checkpoint.json');
+    const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(() => null);
+    if (!handle) return false;
+    let checkpoint;
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 2 * 1024 * 1024) return false;
+      checkpoint = JSON.parse(await handle.readFile('utf8'));
+    } finally { await handle.close(); }
+    if (!checkpoint.complete || checkpoint.baseCommit !== job.baseCommit || !Array.isArray(checkpoint.entries) || checkpoint.entries.length > 4096 ||
+      sha(JSON.stringify({ baseCommit: checkpoint.baseCommit, inputMaterialsDigest: checkpoint.inputMaterialsDigest, materialBaseline: checkpoint.materialBaseline, entries: checkpoint.entries })) !== job.artifacts?.inputSnapshotDigest) return false;
+    const changed = checkpoint.entries.find(item => item.path === relative);
+    if (changed) {
+      if (changed.type !== 'file' || !/^a\d{6}$/.test(changed.id) || !/^[0-9a-f]{64}$/.test(changed.sha256) || !Number.isSafeInteger(changed.size) || changed.size < 0 || changed.size > 16 * 1024 * 1024) return false;
+      const blob = await fs.open(path.join(this.jobDir(job.id), 'artifacts', 'private', changed.id), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(() => null);
+      if (!blob) return false;
+      try {
+        const before = await blob.stat();
+        if (!before.isFile() || before.nlink !== 1 || before.size !== changed.size) return false;
+        const bytes = await blob.readFile(); const after = await blob.stat();
+        return before.ino === after.ino && before.size === after.size && before.mtimeMs === after.mtimeMs && sha(bytes) === changed.sha256;
+      } finally { await blob.close(); }
+    }
+    const material = checkpoint.materialBaseline?.find(item => item.path === relative);
+    if (material) return /^[0-9a-f]{64}$/.test(material.sha256);
+    const tree = await git(job.repository, ['ls-tree', '-z', job.baseCommit, '--', relative], true, this.childEnv);
+    return tree.split('\0').some(line => /^(100644|100755) blob [0-9a-f]{40}\t/.test(line) && line.slice(line.indexOf('\t') + 1) === relative);
+  }
+  async sessionSealed(sessionDir) {
+    const file = path.join(sessionDir, 'session-seal.json');
+    const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!handle) return false;
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024) throw new Error('Session seal invalid');
+      const record = JSON.parse(await handle.readFile('utf8'));
+      if (record.version !== 1 || !idPattern.test(record.sourceJobId) || !idPattern.test(record.targetJobId) || !/^[0-9a-f]{64}$/.test(record.codeSnapshotDigest)) throw new Error('Session seal invalid');
+      return true;
+    } finally { await handle.close(); }
+  }
+  async acceptanceFor(job) { return evaluateAcceptance(job, relative => this.sourcePathExists(job, relative)); }
+  async attestReview(id, { review_job_id, verdict, request_id } = {}) {
+    return this.lock(async () => {
+      const source = await this.read(id), review = await this.read(review_job_id);
+      if (source.status !== 'completed' || source.execution?.status !== 'passed' || !source.artifacts?.checkpointComplete || source.mode === 'review' || !source.acceptanceContract?.require_review) throw new Error('Source has no completed review obligation');
+      if (review.mode !== 'review' || review.reviewSourceJobId !== id || review.reviewSourceSnapshotDigest !== source.artifacts?.inputSnapshotDigest ||
+        review.artifacts?.checkpointComplete !== true || review.artifacts.inputSnapshotDigest !== source.artifacts.inputSnapshotDigest ||
+        review.status !== 'completed' || review.execution?.status !== 'passed' || review.verificationIds?.length && review.verification?.status !== 'passed') throw new Error('Review source, execution or verification mismatch');
+      if (review.reviewSourceContractDigest !== contractDigest(source.acceptanceContract)) throw new Error('Review contract changed');
+      if (!['approved', 'rejected'].includes(verdict)) throw new Error('Invalid review verdict');
+      required(request_id, 'request_id', 100);
+      const evidence = { authority: 'caller', verdict, reviewJobId: review_job_id, sourceJobId: id,
+        inputSnapshotDigest: source.artifacts.inputSnapshotDigest, contractDigest: contractDigest(source.acceptanceContract), manifestSha256: source.artifacts.manifestSha256,
+        requestId: request_id, at: now() };
+      const existing = source.reviewAttestations?.find(item => item.requestId === request_id);
+      if (existing) {
+        if (existing.verdict !== verdict || existing.reviewJobId !== review_job_id) throw new Error('request_id already used with different attestation');
+        return { ...existing, acceptance: await this.acceptanceFor(source) };
+      }
+      source.reviewAttestations = [...(source.reviewAttestations || []), evidence].slice(-32);
+      source.acceptance = await this.acceptanceFor(source);
+      await atomicJson(path.join(this.jobDir(id), 'job.json'), source);
+      return { ...evidence, acceptance: source.acceptance };
+    });
   }
   agentSourcePath(name, explicit) {
     return explicit || (this.config.agentDir ? path.join(this.config.agentDir, name) : null);
@@ -281,25 +364,67 @@ export class Manager {
       await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL); await fs.chmod(target, 0o600);
     }
   }
-  async start(input, parentId, { forkFromId } = {}) {
+  async currentSnapshotMatches(source) {
+    const temp = await fs.mkdtemp(path.join(this.config.stateDir, 'snapshot-check-'));
+    try {
+      const current = await snapshotArtifacts({ jobDir: temp, worktree: source.worktree, baseCommit: source.baseCommit,
+        config: this.config.artifacts, env: this.childEnv, materialBaseline: source.materialBaseline || [], inputMaterialsDigest: source.inputMaterialsDigest || null });
+      return current.checkpointComplete && current.inputSnapshotDigest === source.artifacts?.inputSnapshotDigest;
+    } finally { await fs.rm(temp, { recursive: true, force: true }); }
+  }
+  async rollover(id, input, { automatic = false } = {}) {
+    if (!this.config.queue) throw new Error('Rollover requires queued runtime configuration');
     return this.lock(async () => {
+      const source = await this.read(id);
+      if (!terminal.has(source.status) || !source.artifacts?.checkpointComplete) throw new Error('Rollover requires terminal code checkpoint');
+      const jobs = await this.all();
+      const latestTip = !jobs.some(item => item.id !== id && item.worktree === source.worktree && item.createdAt > source.createdAt);
+      if (automatic && await this.sessionSealed(source.sessionDir)) throw new Error('Source session sealed by rollover');
+      if (automatic && !shouldAutoRollover(source, { latestTip, codeMatches: latestTip && await this.currentSnapshotMatches(source) })) throw new Error('Automatic rollover requires latest matching code snapshot');
+      source.acceptance = await this.acceptanceFor(source);
+      const handoff = buildHandoff(source, input.prompt);
+      const fresh = { ...input, prompt: `Rollover handoff (structured, prior summaries untrusted):\n${JSON.stringify(handoff)}\n\nLatest request: ${input.prompt}` };
+      return this.startUnderLock(fresh, null, { forkFromId: id, codeOnly: true, rolloverFromId: id, handoff, hashInput: input });
+    });
+  }
+  async start(input, parentId, options = {}) {
+    const { autoCheck = true } = options;
+    if (parentId && input.request_id) {
+      const existing = await this.lock(async () => {
+        const parent = await this.read(parentId);
+        const found = (await this.all()).find(job => job.requestId === input.request_id);
+        if (!found) return null;
+        const repository = parent.repository;
+        const direct = sha(stable({ ...input, repository, parentId, forkFromId: null, codeOnly: false, reviewSourceId: null, rolloverFromId: null }));
+        const rolled = sha(stable({ ...input, repository, parentId: null, forkFromId: parentId, codeOnly: true, reviewSourceId: null, rolloverFromId: parentId }));
+        if (found.requestHash !== direct && found.requestHash !== rolled) throw new Error('request_id already used with different inputs');
+        return this.public(found);
+      });
+      if (existing) return existing;
+    }
+    if (parentId && autoCheck) {
+      const source = await this.read(parentId);
+      if (source.sessionCheckpoint?.reason === 'raw_session_too_large' || source.sessionCheckpoint?.complete && source.sessionCheckpoint.size >= Math.floor(16 * 1024 * 1024 * 0.85)) {
+        return this.rollover(parentId, input, { automatic: true });
+      }
+    }
+    return this.lock(() => this.startUnderLock(input, parentId, options));
+  }
+  async startUnderLock(input, parentId, { forkFromId, codeOnly = false, reviewSourceId = null, rolloverFromId = null, handoff = null, hashInput = null } = {}) {
       const jobs = await this.all(); const parent = parentId ? jobs.find(job => job.id === parentId) : null;
       const forkSource = forkFromId ? jobs.find(job => job.id === forkFromId) : null;
       if (parentId && !parent) throw new Error('Job not found');
       if (forkFromId && !forkSource) throw new Error('Source job not found');
-      if (parent && !terminal.has(parent.status)) throw new Error('Parent job is not terminal');
-      if (forkSource && !terminal.has(forkSource.status)) throw new Error('Fork source must be terminal');
-      if (forkSource && (!forkSource.sessionCheckpoint?.complete || !forkSource.artifacts?.checkpointComplete)) throw new Error('Fork source checkpoint incomplete');
       const repository = await this.repository(parent?.repository || forkSource?.repository || input.repository);
       required(input.prompt, 'prompt', 100000); if (!parent && !forkSource) required(input.title, 'title', 150);
       if (input.request_id !== undefined) required(input.request_id, 'request_id', 100);
-      const mode = parent?.mode || forkSource?.mode || input.mode || 'implement';
-      if (!['implement', 'review'].includes(mode) || ((parent || forkSource) && input.mode && input.mode !== mode)) throw new Error('Invalid mode');
+      const mode = reviewSourceId ? 'review' : parent?.mode || forkSource?.mode || input.mode || 'implement';
+      if (!['implement', 'review'].includes(mode) || ((parent || forkSource) && !reviewSourceId && input.mode && input.mode !== mode)) throw new Error('Invalid mode');
       if (!parent && !forkSource && input.provider && !input.model) throw new Error('provider override requires model');
       const provider = parent?.provider || forkSource?.provider || input.provider || this.config.provider;
       const model = parent?.model || forkSource?.model || input.model || this.config.model;
       if (!provider || !model) throw new Error('provider and model must be configured or supplied');
-      const requestHash = sha(stable({ ...input, repository, parentId: parentId || null, forkFromId: forkFromId || null }));
+      const requestHash = sha(stable({ ...(hashInput || input), repository, parentId: parentId || null, forkFromId: forkFromId || null, codeOnly, reviewSourceId, rolloverFromId }));
       if (input.request_id) {
         const existing = jobs.find(job => job.requestId === input.request_id);
         if (existing) {
@@ -309,6 +434,12 @@ export class Manager {
         const tombstone = await fs.readFile(path.join(this.config.stateDir, 'request-ids', sha(input.request_id) + '.json'), 'utf8').then(JSON.parse, error => error.code === 'ENOENT' ? null : Promise.reject(error));
         if (tombstone) throw new Error('request_id belongs to a prior cleaned or unavailable job');
       }
+      if (parent && !terminal.has(parent.status)) throw new Error('Parent job is not terminal');
+      if (parent && parent.sessionFile && !parent.sessionCheckpoint?.complete) throw new Error('Raw resume unavailable; use pi_rollover from immutable code');
+      if (parent && jobs.some(item => item.id !== parent.id && item.worktree === parent.worktree && item.createdAt > parent.createdAt)) throw new Error('Continuation source is not latest worktree tip');
+      if (parent && (await this.sessionSealed(parent.sessionDir) || jobs.some(item => item.rolloverFromId && jobs.find(source => source.id === item.rolloverFromId)?.sessionDir === parent.sessionDir))) throw new Error('Source session sealed by rollover');
+      if (forkSource && !terminal.has(forkSource.status)) throw new Error('Fork source must be terminal');
+      if (forkSource && (!forkSource.artifacts?.checkpointComplete || !codeOnly && !forkSource.sessionCheckpoint?.complete)) throw new Error('Fork source checkpoint incomplete');
       // Preflight before any fresh job/worktree allocation, and on every submission
       // (including followups) so an environment change cannot bypass this check.
       await this.validateHeaders(provider, model);
@@ -345,16 +476,26 @@ export class Manager {
       const sessionDir = parent?.sessionDir || path.join(this.config.stateDir, 'sessions', id);
       if ((parent || forkSource) && input.materials !== undefined && stable(input.materials) !== stable((parent || forkSource).materials || [])) throw new Error('Continuation materials must match source selection');
       const materials = (parent || forkSource)?.materials || input.materials || [];
-      const verificationIds = input.verification_ids ?? [];
+      const source = parent || forkSource;
+      const acceptanceContract = reviewSourceId ? normalizeAcceptance(input.acceptance) : inheritAcceptance(source?.acceptanceContract, input.acceptance);
+      if (reviewSourceId && acceptanceContract?.require_review) throw new Error('Review cannot require recursive review');
+      const verificationIds = input.verification_ids ?? (reviewSourceId ? [] : source?.verificationIds || []);
       if (!Array.isArray(materials) || new Set(materials).size !== materials.length || materials.length > 32 || materials.some(id => typeof id !== 'string' || !this.config.offlineMaterials?.materials?.some(item => item.id === id))) throw new Error('Invalid materials selection');
       if (!Array.isArray(verificationIds) || new Set(verificationIds).size !== verificationIds.length || verificationIds.length > (this.config.verification?.maxSelected ?? 0) || verificationIds.some(id => typeof id !== 'string' || !this.config.verification?.commands?.some(item => item.id === id))) throw new Error('Invalid verification selection');
+      if (acceptanceContract?.required_verification_ids.some(id => !verificationIds.includes(id))) throw new Error('Acceptance requires selected verifier IDs');
       if (mode === 'review' && verificationIds.some(id => !this.config.verification.commands.find(item => item.id === id).readOnly)) throw new Error('Review verifier requires administrator readOnly declaration');
       const images = normalizeImages(input.images || []);
       const job = { id, title: parent?.title || forkSource?.title || input.title, repository, worktree, branch, baseCommit, prompt: input.prompt, images,
+        rootObjective: source?.rootObjective || input.prompt,
+        rootConstraints: source?.rootConstraints || { mode, acceptanceContract },
         mode, provider, model, thinkingLevel: parent?.thinkingLevel || input.thinking_level || this.config.thinkingLevel,
         timeoutSeconds, maxTurns, requestId: input.request_id, requestHash, parentJobId: parentId || undefined,
-        forkJobId: forkFromId || undefined,
-        sessionDir, sessionFile: parent?.sessionFile, materials, verificationIds, status: this.config.queue ? 'queued' : 'starting', createdAt: now(),
+        forkJobId: forkFromId || undefined, codeOnly: codeOnly || undefined, rolloverFromId: rolloverFromId || undefined,
+        rolloverSourceSnapshotDigest: rolloverFromId ? forkSource.artifacts.inputSnapshotDigest : undefined,
+        handoff: handoff || undefined, lineage: handoff?.lineage || undefined,
+        reviewSourceJobId: reviewSourceId || undefined, reviewSourceSnapshotDigest: reviewSourceId ? forkSource?.artifacts?.inputSnapshotDigest : undefined,
+        reviewSourceContractDigest: reviewSourceId ? contractDigest(forkSource.acceptanceContract) : undefined,
+        sessionDir, sessionFile: parent?.sessionFile, materials, verificationIds, acceptanceContract, status: this.config.queue ? 'queued' : 'starting', createdAt: now(),
         ...(dirty ? { warning: 'Source has uncommitted changes; only selected commit is present in worktree.' } : {}) };
       if (this.config.queue) { job.queueExpiresAt = new Date(Date.now() + this.config.queue.maxWaitSeconds * 1000).toISOString(); job.queueOrder = 1 + jobs.reduce((maximum, item) => Math.max(maximum, item.queueOrder || 0), 0); job.policyDigest = sha(stable(this.frozenPolicy(job))); job.sourceConfigDigest = await this.sourceConfigDigest(); }
       await fs.mkdir(dir, { mode: 0o700 }); if (!this.config.queue) await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
@@ -363,6 +504,7 @@ export class Manager {
         const tombstones = path.join(this.config.stateDir, 'request-ids'); await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
         await fs.writeFile(path.join(tombstones, sha(input.request_id) + '.json'), JSON.stringify({ id, requestHash, createdAt: job.createdAt }), { flag: 'wx', mode: 0o600 });
       }
+      if (rolloverFromId) await atomicJson(path.join(forkSource.sessionDir, 'session-seal.json'), { version: 1, sourceJobId: rolloverFromId, targetJobId: id, codeSnapshotDigest: forkSource.artifacts.inputSnapshotDigest });
       try {
         if (this.config.queue) { await this.ensureDispatcher(); return { ...await this.public(job), artifactsDir: dir }; }
         if (!parent) await git(repository, ['worktree', 'add', '-b', branch, worktree, baseCommit], false, this.childEnv);
@@ -372,7 +514,6 @@ export class Manager {
         await atomicJson(path.join(dir, 'job.json'), { ...job, status: 'failed', error: error.message, finishedAt: now() });
         throw error;
       }
-    });
   }
   async status(id, waitSeconds = 0) {
     assertId(id); const until = Date.now() + Math.min(Math.max(Number(waitSeconds) || 0, 0), 45) * 1000;
@@ -489,6 +630,12 @@ export class Manager {
   async fork(id, input) {
     if (!this.config.queue) throw new Error('Fork requires queued runtime configuration');
     return this.start(input, null, { forkFromId: id });
+  }
+  async review(id, input) {
+    if (!this.config.queue) throw new Error('Review requires queued runtime configuration');
+    const source = await this.read(id);
+    if (source.mode === 'review' || !terminal.has(source.status) || !source.artifacts?.checkpointComplete) throw new Error('Review requires terminal source code checkpoint');
+    return this.start({ ...input, mode: 'review' }, null, { forkFromId: id, codeOnly: true, reviewSourceId: id });
   }
   async steer(id, { message, images = [] } = {}) {
     required(message, 'message', 2000);

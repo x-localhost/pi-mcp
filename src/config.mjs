@@ -24,6 +24,8 @@ import path from 'node:path';
 import { validateArtifactConfig } from './artifacts.mjs';
 import { validateOfflineConfig } from './offline-materials.mjs';
 import { validateApprovedMcp } from './approved-mcp.mjs';
+import { normalizeContext } from './context-policy.mjs';
+import { normalizeObservation } from './observation.mjs';
 
 const REDACTED = '[REDACTED]';
 
@@ -47,7 +49,7 @@ const TOP_LEVEL_FIELDS = [
   'allowedCommands',
   'envAllowlist',
   'network',
-  'queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials', 'approvedMcp',
+  'queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials', 'approvedMcp', 'context', 'observation',
 ];
 
 function strictObject(raw, allowed, label) {
@@ -69,12 +71,16 @@ function normalizeVerification(raw = {}) {
   if (!Array.isArray(commands) || commands.length > 32) fail('verification.commands', 'invalid command list');
   const ids = new Set();
   const normalized = commands.map(item => {
-    strictObject(item, ['id', 'argv', 'timeoutSeconds', 'maxOutputBytes', 'readOnly'], 'verification.commands');
+    strictObject(item, ['id', 'description', 'argv', 'timeoutSeconds', 'maxOutputBytes', 'readOnly', 'protectedFiles'], 'verification.commands');
     if (!/^[a-z][a-z0-9_-]{0,47}$/.test(item.id || '') || ids.has(item.id)) fail('verification.commands', 'invalid or duplicate command id');
     ids.add(item.id);
     if (!Array.isArray(item.argv) || item.argv.length < 1 || item.argv.length > 16 || item.argv.some(value => typeof value !== 'string' || !value || value.length > 512 || /[\0\r\n]/.test(value)) || !path.isAbsolute(item.argv[0]) || path.normalize(item.argv[0]) !== item.argv[0] || item.argv[0].split('/').some(part => part === '.' || part === '..') || !['/usr/bin', '/bin', '/usr/local/bin', '/opt/project-tools'].some(root => item.argv[0].startsWith(root + '/'))) fail('verification.commands', 'argv must pin an image-packaged absolute executable and bounded arguments');
     if (item.readOnly !== undefined && typeof item.readOnly !== 'boolean') fail('verification.commands.readOnly', 'must be boolean');
-    return { id: item.id, argv: [...item.argv], timeoutSeconds: bounded(item, 'timeoutSeconds', 300, 1, 3600, 'verification.commands'), maxOutputBytes: bounded(item, 'maxOutputBytes', 65536, 1, 1048576, 'verification.commands'), readOnly: item.readOnly === true };
+    if (item.description !== undefined && (typeof item.description !== 'string' || !item.description.trim() || item.description.length > 200)) fail('verification.commands.description', 'invalid description');
+    if (item.protectedFiles !== undefined && (!Array.isArray(item.protectedFiles) || item.protectedFiles.length > 32 || item.protectedFiles.some(file => !file || typeof file !== 'object' || Array.isArray(file) || Object.keys(file).some(key => !['path', 'sha256'].includes(key)) || typeof file.path !== 'string' || !path.isAbsolute(file.path) || path.normalize(file.path) !== file.path || !file.path.startsWith('/opt/project-tools/') || !/^[0-9a-f]{64}$/.test(file.sha256)))) fail('verification.commands.protectedFiles', 'invalid packaged file hashes');
+    if (item.protectedFiles?.length && !item.argv.some(arg => item.protectedFiles.some(file => file.path === arg))) fail('verification.commands.protectedFiles', 'must include the declared script or executable');
+    if (item.protectedFiles?.length && item.argv.filter(arg => arg.startsWith('/opt/project-tools/')).some(arg => !item.protectedFiles.some(file => file.path === arg))) fail('verification.commands.protectedFiles', 'all packaged argv files must be pinned');
+    return { id: item.id, description: item.description || '', argv: [...item.argv], protectedFiles: item.protectedFiles || [], timeoutSeconds: bounded(item, 'timeoutSeconds', 300, 1, 3600, 'verification.commands'), maxOutputBytes: bounded(item, 'maxOutputBytes', 65536, 1, 1048576, 'verification.commands'), readOnly: item.readOnly === true };
   });
   return { commands: normalized, maxSelected: bounded(raw, 'maxSelected', 4, 1, 8, 'verification') };
 }
@@ -99,7 +105,7 @@ export function validateCompletionSections(raw = {}, configDir = '/') {
   return { queue: normalizeQueue(section('queue')), verification: normalizeVerification(section('verification')),
     budgets: normalizeBudgets(section('budgets')), retention: normalizeRetention(section('retention')),
     artifacts: validateArtifactConfig(section('artifacts')), offlineMaterials: validateOfflineConfig(section('offlineMaterials'), configDir),
-    approvedMcp: validateApprovedMcp(raw.approvedMcp) };
+    approvedMcp: validateApprovedMcp(raw.approvedMcp), context: normalizeContext(raw.context), observation: normalizeObservation(raw.observation) };
 }
 
 // Names that must never be reachable through the generic envAllowlist,
@@ -302,7 +308,7 @@ export function validateConfig(raw, configDir) {
   const authFile = normalizeOptionalPath(raw, 'authFile', configDir);
 
   const network = normalizeNetwork(raw.network, configDir);
-  const { queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp } = validateCompletionSections(raw, configDir);
+  const { queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation } = validateCompletionSections(raw, configDir);
 
   return {
     piPath,
@@ -322,7 +328,7 @@ export function validateConfig(raw, configDir) {
     allowedCommands,
     envAllowlist,
     network,
-    queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp,
+    queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation,
   };
 }
 

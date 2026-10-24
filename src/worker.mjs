@@ -14,6 +14,7 @@ import { snapshotArtifacts, attachArtifactReport } from './artifacts.mjs';
 import { runVerifier, evaluateVerification, reconcileFinalSnapshot } from './verification.mjs';
 import { appendJobEvent } from './events.mjs';
 import { normalizeImages, modelSupportsImages } from './images.mjs';
+import { POLICY_READY_TIMEOUT_MS } from './approved-mcp.mjs';
 
 process.umask(0o077);
 const exec = promisify(execFile);
@@ -27,6 +28,7 @@ const now = () => new Date().toISOString();
 const sessionRoot = await fs.realpath(job.sessionDir);
 let child, rpc, stopping, finalText = '', settled = false, finalStopReason, providerError = '', stderrChunks = [], stderrBytes = 0, stderrOverflow = false;
 let eventChain = Promise.resolve(), usageBaseline = null, stopPromise;
+const seenObservationIds = new Set();
 const secretValues = [];
 secretValues.push(...(runtime.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value)));
 // A value reached through a "headers" map is treated as secret regardless of
@@ -150,7 +152,9 @@ async function run() {
     provider: job.provider, model: job.model, childEnv: process.env });
   const nonce = randomUUID(); const readyFile = path.join(dir, 'policy-ready.json');
   const policyFile = path.join(dir, 'policy.json');
-  await atomicJson(policyFile, { nonce, readyFile, denyFile: path.join(dir, 'denials.jsonl'), worktree: job.worktree, mode: job.mode, allowedCommands: runtime.allowedCommands, approvedMcp: runtime.approvedMcp });
+  await atomicJson(policyFile, { nonce, readyFile, denyFile: path.join(dir, 'denials.jsonl'), worktree: job.worktree, mode: job.mode, allowedCommands: runtime.allowedCommands, approvedMcp: runtime.approvedMcp,
+    jobId: job.id.slice(5), context: runtime.context, observation: runtime.observation, observationFile: path.join(dir, 'observation.jsonl'),
+    activityFile: path.join(dir, 'activity.json'), stopFile: path.join(dir, 'policy-stop.json'), traceInternalGateway: runtime.traceInternalGateway === true });
   const tools = [...(job.mode === 'review' ? ['read', 'grep', 'find', 'ls'] : ['read', 'grep', 'find', 'ls', 'write', 'edit', 'safe_shell']),
     ...(await import('./approved-mcp.mjs')).approvedMcpToolNames(runtime.approvedMcp, job.mode)];
   const args = [...runtime.piArgs, '--mode', 'rpc', '--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve', '--offline',
@@ -206,7 +210,7 @@ async function run() {
       if (event.type === 'error') stop('failed').catch(() => {});
     }
   });
-  const readinessDeadline = Date.now() + 15000;
+  const readinessDeadline = Date.now() + POLICY_READY_TIMEOUT_MS;
   let policyReady = false;
   while (Date.now() < readinessDeadline) {
     const ready = await fs.readFile(readyFile, 'utf8').then(text => { try { return JSON.parse(text); } catch { return null; } }, () => null);
@@ -263,7 +267,8 @@ async function captureSession() {
   let bytes;
   try {
     const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1 || before.size > 16 * 1024 * 1024) throw new Error('Session checkpoint unsafe or too large');
+    if (!before.isFile() || before.nlink !== 1) throw new Error('Session checkpoint unsafe');
+    if (before.size > 16 * 1024 * 1024) { job.sessionCheckpoint = { complete: false, reason: 'raw_session_too_large', size: before.size, codeResumeAvailable: true }; return; }
     bytes = Buffer.alloc(before.size); let cursor = 0;
     while (cursor < bytes.length) { const read = await handle.read(bytes, cursor, bytes.length - cursor, cursor); if (!read.bytesRead) throw new Error('Session changed during checkpoint'); cursor += read.bytesRead; }
     const after = await handle.stat();
@@ -299,6 +304,7 @@ async function finalizeOnce() {
     job.verification = { status: 'skipped', reason: 'Pi writers not proved stopped', commands: [] };
     job.finishedAt = now(); job.heartbeatAt = now(); await emitEvent({ type: 'status', status: 'quarantined' }); await eventChain; await save(); rpc?.close(); return;
   }
+  await consumeObservation().catch(error => { providerError = clean(error.message); if (!stopping) stopping = 'failed'; });
   let terminalStatus = stopping || providerError ? (stopping || 'failed') : 'completed';
   if (terminalStatus !== 'completed') job.error = providerError || `Stopped: ${stopping || 'failed'}`;
   job.execution = { status: terminalStatus === 'completed' ? 'passed' : terminalStatus, stopReason: finalStopReason || null };
@@ -306,7 +312,7 @@ async function finalizeOnce() {
   if (providerError) providerError = clean(providerError);
   if (job.error) job.error = clean(job.error);
   job.exitCode = child?.exitCode ?? null;
-  await captureSession().catch(error => { job.sessionCheckpoint = { complete: false, reason: clean(error.message) }; if (terminalStatus === 'completed') { terminalStatus = 'failed'; job.error = clean(error.message); } });
+  await captureSession().catch(error => { job.sessionCheckpoint = { complete: false, reason: clean(error.message), codeResumeAvailable: true }; });
   await inventory();
   try {
     const denialFile = path.join(dir, 'denials.jsonl');
@@ -412,6 +418,56 @@ async function pumpControls() {
     }
   } finally { pollingControls = false; }
 }
+async function readPrivateJson(name, limit = 4096) {
+  const handle = await fs.open(path.join(dir, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!handle) return null;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > limit) throw new Error('Private policy metadata invalid');
+    return JSON.parse(await handle.readFile('utf8'));
+  } finally { await handle.close(); }
+}
+async function consumeObservation() {
+  const observationFile = path.join(dir, 'observation.jsonl');
+  const handle = await fs.open(observationFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (handle) {
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > (runtime.observation?.maxBytes || 65536)) throw new Error('Observation metadata invalid');
+      const content = await handle.readFile('utf8');
+      const records = content.split('\n').slice(0, -1).filter(Boolean);
+      for (const line of records) {
+        const item = JSON.parse(line);
+        if (item.version !== 1 || typeof item.id !== 'string' || !/^[0-9a-f-]{36}$/.test(item.id) || typeof item.kind !== 'string' || !/^[a-z_]{1,40}$/.test(item.kind) || !/^\d{4}-\d\d-\d\dT/.test(item.at || '')) throw new Error('Observation record invalid');
+        if (seenObservationIds.has(item.id)) continue;
+        seenObservationIds.add(item.id);
+        if (seenObservationIds.size > 2048) seenObservationIds.delete(seenObservationIds.values().next().value);
+        const safe = { type: 'observation', kind: item.kind, at: item.at };
+        for (const field of ['jobId', 'requestId', 'attemptId', 'toolId']) if (typeof item[field] === 'string' && /^[0-9a-f-]{36}$/.test(item[field])) safe[field] = item[field];
+        if (typeof item.toolName === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(item.toolName)) safe.toolName = item.toolName;
+        for (const field of ['durationMs', 'isError', 'droppedMessages']) if (typeof item[field] === 'number' && Number.isFinite(item[field]) || typeof item[field] === 'boolean') safe[field] = item[field];
+        for (const field of ['category', 'outcome', 'retryReason']) if (typeof item[field] === 'string' && /^[a-z_]{1,40}$/.test(item[field])) safe[field] = item[field];
+        await emitEvent(safe);
+      }
+    } finally { await handle.close(); }
+  }
+  const activity = await readPrivateJson('activity.json');
+  if (activity) {
+    if (activity.version !== 1 || activity.lastEventAt !== null && activity.lastEventAt !== undefined && !/^\d{4}-\d\d-\d\dT/.test(activity.lastEventAt) || activity.lastProgressAt !== null && activity.lastProgressAt !== undefined && !/^\d{4}-\d\d-\d\dT/.test(activity.lastProgressAt)) throw new Error('Policy activity invalid');
+    job.lastProgressAt = activity.lastProgressAt || job.lastProgressAt;
+    job.observation = { lastEventAt: activity.lastEventAt, lastProgressAt: activity.lastProgressAt || null,
+      consecutiveToolFailures: Number.isSafeInteger(activity.consecutiveToolFailures) ? activity.consecutiveToolFailures : 0,
+      lastKind: /^[a-z_]{1,40}$/.test(activity.lastKind || '') ? activity.lastKind : null };
+  }
+  const policyStop = await readPrivateJson('policy-stop.json');
+  if (policyStop) {
+    const map = { idle: 'idle_timeout', repeated_tool_failure: 'tool_failure_limit', context_limit: 'context_limit' };
+    if (policyStop.version !== 1 || !map[policyStop.reason]) throw new Error('Policy stop invalid');
+    await stop(map[policyStop.reason]);
+  }
+  if (!stopping && runtime.observation?.idleTimeoutMs > 0 && Date.now() - Date.parse(job.lastProgressAt || job.startedAt) > runtime.observation.idleTimeoutMs) await stop('idle_timeout');
+  if (!stopping && runtime.observation?.consecutiveFailureLimit > 0 && job.observation?.consecutiveToolFailures >= runtime.observation.consecutiveFailureLimit) await stop('tool_failure_limit');
+}
 let watchdogClosing = false, watchdogActive = null;
 const watchdog = setInterval(() => {
   if (watchdogClosing || watchdogActive) return;
@@ -419,6 +475,7 @@ const watchdog = setInterval(() => {
   try {
     job.heartbeatAt = now(); await save();
     await pumpControls();
+    await consumeObservation();
     if (await fs.stat(path.join(dir, 'cancel')).then(() => true, () => false)) await stop('cancelled');
     if (job.startedAt && Date.now() - Date.parse(job.startedAt) >= job.timeoutSeconds * 1000) await stop('timed_out');
   } catch (error) { providerError = clean(error.message); await stop('failed').catch(() => {}); }

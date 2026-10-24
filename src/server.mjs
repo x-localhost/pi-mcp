@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { loadConfig, buildChildEnv, healthConfig } from './config.mjs';
 import { Manager } from './manager.mjs';
 import { sanitize } from './sanitize.mjs';
+import { capabilities } from './capabilities.mjs';
 
 process.umask(0o077);
 const config = await loadConfig();
@@ -23,6 +24,7 @@ const wrap = fn => async args => { try { return out(await fn(args)); } catch (er
 const id = z.string().regex(/^task-[0-9a-f-]{36}$/);
 const requestId = z.string().min(1).max(100).optional();
 const inlineImage = z.object({ mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']), data: z.string().max(1398104) }).strict();
+const acceptance = z.object({ version: z.literal(1), required_verification_ids: z.array(z.string()).max(32).optional(), required_artifact_paths: z.array(z.string()).max(32).optional(), require_review: z.boolean().optional() }).strict();
 const task = {
   prompt: z.string().min(1).max(100000),
   timeout_seconds: z.number().int().min(10).max(config.maxTimeoutSeconds).optional(),
@@ -30,11 +32,16 @@ const task = {
   images: z.array(inlineImage).max(4).optional(),
   materials: z.array(z.string()).max(32).optional(),
   verification_ids: z.array(z.string()).max(8).optional(),
+  acceptance: acceptance.optional(),
   request_id: requestId
 };
 server.registerTool('pi_health', {
   description: 'Check Pi version, credential presence, roots and capacity without making a provider request.', inputSchema: {}, annotations: { readOnlyHint: true, openWorldHint: false }
 }, wrap(async () => ({ ...await manager.health(), config: healthConfig(config) })));
+server.registerTool('pi_capabilities', {
+  description: 'Discover safe versioned model, verifier, material, mode, continuation, contract and limit metadata.',
+  inputSchema: {}, annotations: { readOnlyHint: true, openWorldHint: false }
+}, wrap(() => capabilities(config)));
 server.registerTool('pi_delegate', {
   description: 'Start a bounded Pi task asynchronously in a dedicated Git worktree from a committed ref.',
   inputSchema: { repository: z.string().min(1), title: z.string().min(1).max(150), ...task,
@@ -64,6 +71,19 @@ server.registerTool('pi_fork', {
   description: 'Fork a terminal job from its immutable source and Pi session checkpoints into a distinct worktree/session.',
   inputSchema: { job_id: id, ...task }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
 }, wrap(({ job_id, ...args }) => manager.fork(job_id, args)));
+server.registerTool('pi_review', {
+  description: 'Review a terminal immutable code checkpoint in a fresh read-only Pi session and separate worktree; findings are advisory.',
+  inputSchema: { job_id: id, ...task }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
+}, wrap(({ job_id, ...args }) => manager.review(job_id, args)));
+server.registerTool('pi_rollover', {
+  description: 'Continue immutable terminal code in a fresh session with a bounded structured handoff.',
+  inputSchema: { job_id: id, ...task }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
+}, wrap(({ job_id, ...args }) => manager.rollover(job_id, args)));
+server.registerTool('pi_attest_review', {
+  description: 'Record an explicit caller-authority review verdict bound to source, snapshot, contract and completed review job. Caller identity is not authenticated.',
+  inputSchema: { job_id: id, review_job_id: id, verdict: z.enum(['approved', 'rejected']), request_id: z.string().min(1).max(100) },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+}, wrap(({ job_id, ...args }) => manager.attestReview(job_id, args)));
 server.registerTool('pi_events', {
   description: 'Read bounded sanitized persisted progress events by cursor; gaps are explicit.',
   inputSchema: { job_id: id, cursor: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }, annotations: { readOnlyHint: true, openWorldHint: false }

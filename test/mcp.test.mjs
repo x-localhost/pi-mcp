@@ -35,10 +35,13 @@ test('bounded MCP stdio controls and artifacts survive reconnect and preserve jo
   let { client, transport } = await connect();
   t.after(async () => { await client.close().catch(() => {}); await transport.close().catch(() => {}); });
   const names = (await client.listTools()).tools.map(tool => tool.name).sort();
-  assert.deepEqual(names, ['pi_artifacts', 'pi_cancel', 'pi_cleanup', 'pi_delegate', 'pi_events', 'pi_followup', 'pi_fork', 'pi_health', 'pi_list', 'pi_read_artifact', 'pi_recover', 'pi_result', 'pi_status', 'pi_steer']);
+  assert.deepEqual(names, ['pi_artifacts', 'pi_attest_review', 'pi_cancel', 'pi_capabilities', 'pi_cleanup', 'pi_delegate', 'pi_events', 'pi_followup', 'pi_fork', 'pi_health', 'pi_list', 'pi_read_artifact', 'pi_recover', 'pi_result', 'pi_review', 'pi_rollover', 'pi_status', 'pi_steer']);
   const call = (name, args = {}) => client.callTool({ name, arguments: args });
   const health = payload(await call('pi_health'));
   assert.equal(health.version, '1.4.0');
+  const capabilities = payload(await call('pi_capabilities'));
+  assert.equal(capabilities.version, 1);
+  assert.equal(capabilities.models[0].model, 'mock');
   const started = payload(await call('pi_delegate', { repository, title: 'MCP', prompt: 'Do task [FAKE_ARTIFACT_BASE64]', verification_ids: ['unit'], request_id: 'stable' }));
   assert.equal(payload(await call('pi_delegate', { repository, title: 'MCP', prompt: 'Do task [FAKE_ARTIFACT_BASE64]', verification_ids: ['unit'], request_id: 'stable' })).id, started.id);
   await client.close(); await transport.close();

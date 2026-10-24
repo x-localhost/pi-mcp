@@ -107,15 +107,16 @@ export function validateOfflineConfig(raw = {}, configDir) {
   if (!Array.isArray(list) || list.length > 32) throw new Error('Invalid offline material declarations');
   const ids = new Set();
   const materials = list.map(item => {
-    plain(item, 'offline material'); keys(item, ['id', 'manifestPath', 'manifestSha256', 'baseCommit', 'destination', 'collision', 'submoduleCommit'], 'offline material');
+    plain(item, 'offline material'); keys(item, ['id', 'description', 'manifestPath', 'manifestSha256', 'baseCommit', 'destination', 'collision', 'submoduleCommit'], 'offline material');
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(item.id || '') || ids.has(item.id)) throw new Error('Invalid or duplicate material id');
     ids.add(item.id);
+    if (item.description !== undefined && (typeof item.description !== 'string' || !item.description.trim() || item.description.length > 200 || /[\p{Cc}\p{Cf}]/u.test(item.description))) throw new Error('Invalid offline material description');
     if (typeof item.manifestPath !== 'string' || !item.manifestPath || !SHA.test(item.manifestSha256) || !COMMIT.test(item.baseCommit)) throw new Error('Invalid pinned material');
     const destination = safePath(item.destination);
     const collision = item.collision ?? 'reject';
     if (!['reject', 'overlay-lfs', 'submodule'].includes(collision)) throw new Error('Invalid material collision policy');
     if (collision === 'submodule' && !COMMIT.test(item.submoduleCommit || '') || collision !== 'submodule' && item.submoduleCommit !== undefined) throw new Error('Invalid submodule commit pin');
-    return { id: item.id, manifestPath: path.resolve(configDir, item.manifestPath), manifestSha256: item.manifestSha256, baseCommit: item.baseCommit, destination, collision, ...(item.submoduleCommit ? { submoduleCommit: item.submoduleCommit } : {}) };
+    return { id: item.id, description: item.description || '', manifestPath: path.resolve(configDir, item.manifestPath), manifestSha256: item.manifestSha256, baseCommit: item.baseCommit, destination, collision, ...(item.submoduleCommit ? { submoduleCommit: item.submoduleCommit } : {}) };
   });
   const dirs = materials.map(x => x.destination.toLowerCase());
   for (let i = 0; i < dirs.length; i++) for (let j = i + 1; j < dirs.length; j++) if (dirs[i] === dirs[j] || dirs[i].startsWith(`${dirs[j]}/`) || dirs[j].startsWith(`${dirs[i]}/`)) throw new Error('Material destination collision');
