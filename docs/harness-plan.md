@@ -304,3 +304,12 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   reports its thread limit. The available runtime Sol will implement correction
   units serially in their separate worktrees, with the same role/model and no
   permission change. Astra separately reviews committed workflow recovery.
+- Workflow review additionally requires exact Manager request identity during
+  recovery/cancel, automatic rollover reconciliation, atomic acceptance/source
+  validation with submission and release, review-child acceptance gates, truthful
+  missing pricing/usage, and terminal cancelled-child accounting. After the
+  runtime correction commit, the available Sol will handle these and the remaining
+  context/observation fixes together in the unused observation-fixes worktree,
+  fast-forwarded to the reviewed integration base. It also owns the necessary
+  Manager internal admission interface in that serialized unit. This avoids
+  competing writers and repeated dependency handoffs under the native thread cap.
