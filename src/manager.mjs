@@ -16,6 +16,7 @@ import { normalizeImages } from './images.mjs';
 import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts } from './artifacts.mjs';
 import { normalizeAcceptance, inheritAcceptance, evaluateAcceptance, contractDigest } from './acceptance.mjs';
 import { buildHandoff, shouldAutoRollover } from './session-transition.mjs';
+import { readWorkflowReferences } from './workflow.mjs';
 
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -564,11 +565,14 @@ export class Manager {
     const effectiveAge = older_than_days === undefined && dry_run && job_ids.length === 0 ? this.config.retention?.terminalDays : older_than_days;
     return this.lock(async () => {
       const jobs = await this.all();
+      const workflowRefs = await readWorkflowReferences(this.config.stateDir);
+      const workflowJobIds = new Set(workflowRefs.jobIds);
+      const workflowRequestIds = new Set(workflowRefs.requestIds);
       for (const id of job_ids) if (!jobs.some(job => job.id === id)) throw new Error(`Cleanup job not found: ${id}`);
       const selected = jobs.filter(job => job_ids.includes(job.id) || effectiveAge !== undefined && terminal.has(job.status) && Date.now() - Date.parse(job.finishedAt || job.createdAt) >= effectiveAge * 86400000);
       const ids = new Set(selected.map(job => job.id)); const refused = [], candidates = [];
       for (const job of selected) {
-        const reason = !terminal.has(job.status) ? 'not_terminal' : jobs.some(other => !ids.has(other.id) && (other.parentJobId === job.id || other.forkJobId === job.id || other.worktree === job.worktree || other.sessionDir === job.sessionDir)) ? 'referenced' : job.exportedAt ? 'export_reference' : null;
+        const reason = !terminal.has(job.status) ? 'not_terminal' : workflowJobIds.has(job.id) || workflowRequestIds.has(job.requestId) || jobs.some(other => !ids.has(other.id) && (other.parentJobId === job.id || other.forkJobId === job.id || other.worktree === job.worktree || other.sessionDir === job.sessionDir)) ? 'referenced' : job.exportedAt ? 'export_reference' : null;
         if (reason) { refused.push({ id: job.id, reason }); continue; }
         if (!job.worktree.startsWith(this.worktreesDir + path.sep) || path.dirname(job.worktree) !== this.worktreesDir || !job.branch.startsWith('codex/pi/')) { refused.push({ id: job.id, reason: 'ownership_path' }); continue; }
         candidates.push(job);
