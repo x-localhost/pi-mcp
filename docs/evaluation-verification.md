@@ -151,3 +151,36 @@ correctness gaps remain, described in [evaluation-review.md](evaluation-review.m
 The complete suite pass does not establish coverage of those newly found cases.
 A dedicated Sol review-fixes unit is adding the missing RED regressions; final
 review, committed verification and main integration remain pending.
+
+## Review closure and readiness regression at `73c42f7`
+
+Sol's final evaluator unit `f8a7929` was integrated as
+`acd9d63a680283eed8006a2e4afd313851126b1e`, with plan-only checkpoint
+`73c42f7054810aba626ea2d3f26236210d6b8199` (tree
+`87312e9db7191a1a47fa0367c46e73d500929a76`). The focused suite passed **62/62**,
+no fail/skip/cancel, 13053.900422ms. The [review-fixes unit report](harness-evals-review-fixes-report.md)
+records before-fix failures separately from regression tests added after code.
+Independent native Astra approved all five findings and the additional dirty-code
+guard at this exact source, subject to the parent's complete regression.
+
+Parent replay, comparison, byte-identical baseline repeat and independent result
+inspection all passed again with the same expected synthetic outcomes listed
+above. However, the full suite returned **383/384**, 15 suites, fail1,
+cancelled/skipped0, exit1, 283182.839135ms. The existing
+`real Pi drops a complete two-tool group and observation omits raw call data`
+test failed at `test/harness-context.test.mjs:83` while parsing the readiness
+file, before any task prompt. The file can briefly exist with an incomplete JSON
+write. The production worker already retries parsing; four test polling sites
+caught read errors but let parse errors escape. This is retained as an actual
+failed checkpoint, not replaced by a passing rerun.
+
+Parent made the four-line test-only correction in isolated readiness worktree
+at base `73c42f7`, committed as `d95ca5b`. The deadline and final assertions are
+unchanged, and persistent invalid readiness still fails. No runtime change was
+needed. A separate paid review was unnecessary for this small correction.
+Command in the same pinned image: `timeout 90s node --test --test-concurrency=1
+test/harness-context.test.mjs test/real-approved-mcp.test.mjs`. Five runs each
+passed **6/6**, fail/cancel/skip0, exit0; durations 9547.870614, 9737.767936,
+10241.330375, 9454.348815 and 9585.152458ms. Their exact Docker script and logs
+are under the readiness evidence root. The failed checkpoint's complete reports,
+commands, metadata and regression log are preserved as `checkpoint-73c42f7`.

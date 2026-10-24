@@ -93,3 +93,25 @@ committed version. Refuse dirty or untracked executable source paths before live
 Manager initialization; keep documentation, external reports and dependency
 caches outside that guard. Add a separate before-fix CLI regression and distinguish
 this parent finding from Astra's five.
+
+## Closure at `73c42f7`
+
+Independent native Astra approved the corrected committed evaluator: all five
+findings and the parent clean-checkout guard are closed, with no remaining source
+review blocker. The review checked report-derived success and aggregates,
+canonical Manager run identity, artifact presence, independent preservation,
+bounded generic diagnostics and the dirty-code guard. Focused tests passed 62/62
+and parent deterministic replay/comparison passed. Review was read-only and did
+not call providers or rerun tests.
+
+Explicit numeric success-rate deltas remain an optional usability choice; existing
+counts and changed-task lists disclose the change. Reports check consistency, not
+origin authentication. Synthetic cases do not establish model quality, and missing
+resume semantics remain unknown. These are documented scope limits, not silently
+passed criteria.
+
+Full integration subsequently exposed a pre-existing test polling race at the Pi
+readiness file (383/384). Parent's four-line correction applies the production
+worker's existing retry-on-partial-JSON behavior to the two affected test files.
+The final committed full-regression result and integration are recorded in
+[evaluation-verification.md](evaluation-verification.md).

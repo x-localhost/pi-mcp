@@ -224,3 +224,10 @@ real-Pi test files repeatedly on gram, review/commit/integrate serially, then
 rerun the complete suite from that exact committed source. Parent owns isolated
 remote root `/tmp/pi-harness-evaluation-readiness-20261024`; the image is shared
 read-only and all providers remain local mocks in network-disabled containers.
+
+The two affected files passed five focused runs, each 6/6 (30 assertions across
+the repetitions), no fail/cancel/skip. Parent self-review confirmed the finite
+readiness deadline and final readiness assertions remain intact. Only transient
+read/parse failure is retried; no runtime behavior or success criterion changed.
+The test correction is committed as `d95ca5b`; integrate it serially and verify
+the resulting committed source before main.
