@@ -114,8 +114,8 @@ workflow inputs. No autonomous deployment, recursive worker spawning or publicat
    `docs/harness-safety-report.md`. Branch `codex/harness/safety`, worktree
    `/Users/leebw/workspace/claude/pi-mcp-worktrees/harness-safety`.
 2. **Runtime** — native GPT-6 Sol high: cross-module acceptance, context/session,
-   code-only review and capabilities. Own `src/{manager,worker,server,config}.mjs`,
-   new acceptance/context/capabilities helpers and corresponding new tests, scoped
+   code-only review and capabilities. Own `src/{manager,worker,server,config,verification}.mjs`,
+   new acceptance/handoff/session/capabilities helpers and corresponding new tests, scoped
    existing runtime tests, runtime guide/report. Branch `codex/harness/runtime`,
    worktree `/Users/leebw/workspace/claude/pi-mcp-worktrees/harness-runtime`.
 3. **Tools/telemetry** — native GPT-6 Sol high: concurrent MCP startup and trusted
@@ -172,3 +172,65 @@ after final review; preserve integration branch if main is unexpectedly dirty.
 ## Assignment and review log
 
 - Initial plan recorded before implementation; design review pending.
+- Astra design review `/root/harness_design` accepted the bounded design with the
+  following adopted amendments. This is design approval, not implementation approval.
+- Acceptance evidence binds source job + stable `inputSnapshotDigest` + canonical
+  contract digest. Every continuation recomputes acceptance; explicit empty
+  selections cannot remove inherited requirements. Review jobs have provenance,
+  separate readonly obligations and no inherited review approval. Caller review
+  attestation is labelled as caller authority, never authenticated human identity.
+- Required code-artifact paths count existing safe regular source files, including
+  unchanged base files; reports/deletions do not satisfy them. Protected graders
+  pin root-owned script/asset files by hash, not only an interpreter executable.
+- Oversized session history does not invalidate completed code. Fresh transitions
+  preserve private old history and seal it against future resume (including older
+  aliases). Automatic rollover rejects stale lineage/code mismatch; explicit
+  rollover intentionally selects the named immutable code snapshot. Mandatory
+  handoff fields never silently truncate; model summaries are untrusted notes.
+- Pi catches transform-hook exceptions, so the history guard must prove abort
+  before network in actual Pi tests. Preserve authoritative task/system state,
+  latest request and complete tool groups; count final serialized bytes/messages.
+- Tools unit additionally owns `src/context-policy.mjs` (pure history guard) and
+  `src/observation.mjs`. Runtime owns handoff/session helpers and passes policy
+  `jobId`, `context` and `observation` settings plus bounded private metadata paths.
+  Policy extension uses these helpers; runtime consumes the reviewed tools commit
+  before final GREEN. New top-level administrator keys are `context` and
+  `observation`; tools exports strict normalizers/defaults for runtime config.
+- Observation records only constructed allowlisted metadata and local opaque IDs,
+  never raw model tool-call IDs/args/results. Correlation headers are injected only
+  for the fixed internal loopback gateway, consumed there and never sent upstream.
+  Heartbeat is not useful progress; disabled/opt-in thresholds are explicit.
+- MCP startup shares a deadline and Pi bootstrap margin, filters inactive servers,
+  aborts all siblings on failure, settles all attempts and closes late successes.
+- Workflow uses one lock order (workflow then submit; cleanup never acquires
+  workflow lock). Durable intent/reference precedes submission. Source/reviewer
+  references, including preparing intents, protect cleanup under submit lock.
+  Required review may run while source acceptance is pending; implementation
+  continuation waits for acceptance. Usage is counted once per unique child;
+  missing dimensions block a configured budget. In-flight child overshoot remains
+  explicit. Cancellation intent is persisted before delivery.
+- Safety reviewed and committed `06e7257`: URI and symlink RED failures followed by GREEN 3/3 on gram, including
+  released Pi denial, lexical-decoy review check and committed-symlink admission.
+- Before feature launch: design reviewer and safety implementer completed;
+  Claude activeJobs=0. Next assignments are runtime Sol, tools Sol, then eval
+  Sonnet if combined active count remains below three. No recursive delegates.
+- Gram `/home` is full; task uses its own `/tmp` buildx metadata directory. Root
+  Docker storage has 267 GB free; no shared resources/settings were changed.
+  Test image `pi-harness-implementation:test-20261024` includes root-owned approved
+  MCP fixtures. Unit source/test/script/docs trees must still be mounted in full.
+
+### Feature-unit integration interface
+
+Tools exports `normalizeContext(raw)`, `normalizeObservation(raw)`, and
+`POLICY_READY_TIMEOUT_MS` from its helpers/approved-MCP module. Configuration
+normalization is strict and tools reports exact defaults to runtime. Worker policy
+includes `jobId`, `context`, `observation`, `observationFile`, `activityFile` and
+`stopFile` as private per-job paths. The extension writes bounded allowlisted
+observation records and atomic latest activity/stop state; worker consumes them
+into public events/lastProgressAt and truthfully stops on context/stall reasons.
+Tools owns context reduction and hook lifecycle; runtime owns the watchdog,
+session size/rollover and handoff. Runtime config passes these policies unchanged.
+Trace injection requires an explicit internal gateway flag derived from the fixed
+profile, never inferred from an arbitrary user URL. Helpers must work with defaults
+when old fixtures omit optional fields. Both implementers confirm this interface
+before coding and notify the lead of necessary revisions; no overlapping edits.
