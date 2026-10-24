@@ -13,7 +13,9 @@ export function normalizeContext(raw) {
 
 const bytes = value => { try { return Buffer.byteLength(JSON.stringify(value)); } catch { return Infinity; } };
 const isSystem = message => message?.role === 'system' || message?.role === 'developer';
-const isToolResult = message => message?.role === 'toolResult' || message?.role === 'tool' || Array.isArray(message?.content) && message.content.some(part => part?.type === 'tool_result');
+const isToolResult = message => message?.role === 'toolResult' || message?.role === 'tool' ||
+  message?.role === 'user' && Array.isArray(message.content) && message.content.length > 0 &&
+  message.content.every(part => part?.type === 'tool_result');
 const callIds = message => {
   if (message?.role !== 'assistant') return [];
   const calls = message.toolCalls ?? message.tool_calls ?? (Array.isArray(message.content) ? message.content.filter(part => ['toolCall', 'tool_use'].includes(part?.type)) : []);

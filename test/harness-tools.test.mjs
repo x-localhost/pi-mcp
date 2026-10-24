@@ -68,6 +68,23 @@ test('context reduction retains every user instruction in native and provider fo
   assert.equal(provider.payload.messages.includes(middle), true);
 });
 
+test('mixed user tool result and text or image remain mandatory as one message', () => {
+  const first = { role: 'user', content: 'A' };
+  const call = { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'read', input: { arguments: 'x'.repeat(70_000) } }] };
+  const mixed = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'result' },
+    { type: 'text', text: 'Preserve C' }] };
+  const image = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'result' },
+    { type: 'image', data: 'AAAA', mimeType: 'image/png' }] };
+  const policy = { maxMessages: 8, maxBytes: 65_536 };
+  assert.equal(reduceContext([first, call, mixed], policy).ok, false);
+  assert.equal(reduceContext([first, call, image], policy).ok, false);
+  assert.equal(guardProviderPayload({ messages: [first, call, mixed] }, policy).ok, false);
+  const old = { role: 'assistant', content: 'x'.repeat(70_000) };
+  const retained = reduceContext([first, old, { ...call, content: [{ type: 'tool_use', id: 't', name: 'read', input: {} }] }, mixed], policy);
+  assert.equal(retained.ok, true);
+  assert.equal(retained.messages.includes(mixed), true);
+});
+
 test('observation progress ignores compaction starts and repeated reductions', async () => {
   const observer = createObservation({});
   const start = observer.snapshot().lastProgressAt;

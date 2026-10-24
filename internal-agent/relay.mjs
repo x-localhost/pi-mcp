@@ -2,6 +2,20 @@ import http from 'node:http';
 import { isAbsolute } from 'node:path';
 
 const ROUTE = '/v1/chat/completions';
+const TRACE_NAMES = ['x-pi-job-id', 'x-pi-request-id', 'x-pi-attempt-id'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function chatTraceHeaders(req) {
+  const counts = Object.fromEntries(TRACE_NAMES.map(name => [name, 0]));
+  for (let index = 0; index < (req.rawHeaders?.length ?? 0); index += 2) {
+    const name = req.rawHeaders[index].toLowerCase();
+    if (Object.hasOwn(counts, name)) counts[name]++;
+  }
+  const present = TRACE_NAMES.filter(name => req.headers[name] !== undefined);
+  if (!present.length) return null;
+  if (present.length !== TRACE_NAMES.length || TRACE_NAMES.some(name => counts[name] !== 1 ||
+    typeof req.headers[name] !== 'string' || !UUID.test(req.headers[name]))) throw new Error('Invalid chat trace');
+  return Object.fromEntries(TRACE_NAMES.map(name => [name, req.headers[name]]));
+}
 export async function startRelay({ socketPath, port = 18080 }) {
   if (typeof socketPath !== 'string' || !isAbsolute(socketPath) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Relay startup failed');
   const connections = new Set();
@@ -12,6 +26,10 @@ export async function startRelay({ socketPath, port = 18080 }) {
     if (req.headers['content-type'] !== undefined) headers['content-type'] = req.headers['content-type'];
     if (req.headers['content-length'] !== undefined) headers['content-length'] = req.headers['content-length'];
     if (req.headers.accept !== undefined) headers.accept = req.headers.accept;
+    if (req.method === 'POST' && req.url === ROUTE) {
+      try { Object.assign(headers, chatTraceHeaders(req)); }
+      catch { res.writeHead(400); res.end(); return; }
+    }
     const peer = http.request({ socketPath, path: req.url, method: req.method, headers, timeout: 35_000, agent: false }, response => {
       res.writeHead(response.statusCode, response.headers);
       response.on('error', () => res.destroy());
