@@ -259,3 +259,20 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   reported, never advertised as a hard provider-spend cap. Cancel intent is durable
   before delivery. Completed/cancelled workflow references remain until explicit
   safe workflow release, preserving review and source evidence.
+
+### Workflow implementation handoff
+
+- Runtime confirmed stable APIs: `review(sourceJobId, input)`,
+  `rollover(sourceJobId, input, {automatic:false})`, and
+  `attestReview(sourceJobId, {review_job_id, verdict, request_id})`.
+  Public evidence uses `acceptance.status`, `sourceJobId`,
+  `inputSnapshotDigest`, `contractDigest`; review provenance uses
+  `reviewSourceJobId/reviewSourceSnapshotDigest/reviewSourceContractDigest`.
+- Evaluation Sonnet job completed without changes after its initial compound Git
+  check was denied by the bridge command allowlist. Actual Sonnet 5 identity was
+  verified in initialization metadata. No substitute model or denied command
+  rerun was used. A narrow read-only Git allowlist decision is pending from user.
+- With two active native jobs and zero active bridge jobs, workflow may start
+  its standalone module/adapter tests against the committed interface now;
+  manager cleanup wiring and actual integration remain serialized after runtime.
+  This keeps useful independent work moving without copying dirty dependencies.
