@@ -171,3 +171,27 @@ independent review of this committed integration checkpoint. Parent owns the
 isolated final replay/full regression under
 `/tmp/pi-harness-evaluation-final-20261024`; the shared image remains read-only.
 No blocker may be carried into the clean-main merge.
+
+## Independent-review corrections
+
+Astra's review of `9d37008` found the five concrete evaluator blockers recorded in
+[evaluation-review.md](evaluation-review.md). Parent's committed replay passed;
+the full suite at this checkpoint is running and will remain labelled as such.
+Native Astra and Sol are terminal/completed, with no active Claude bridge job.
+Reuse Sol for this substantive schema/identity correction unit in dedicated
+worktree `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-review-fixes`,
+branch `codex/evaluation/review-fixes`, committed base `9d370081e3c4f64b3c408cbdde23da8848162719`.
+Its only writing scope is evaluator modules, evaluation CLI/tests/fixtures, the
+evaluation guide and a new review-fixes unit report; no production runtime edits.
+
+Contracts: derive report success and all aggregates from bounded per-task evidence
+with missing-task applicability; use a canonical Manager-owned evaluation registry
+for exact run identity; distinguish required present artifacts from deleted paths;
+grade file preservation independently of execution; emit generic CLI parse errors.
+Retain nullable unavailable evidence, deterministic replay and every existing
+retry/coverage guarantee. Add focused before-fix regressions for all five, then run
+the complete evaluator suite on gram in
+`/tmp/pi-harness-evaluation-review-fixes-20261024`. This root and its container
+names are separate from the parent's frozen full-regression source. Shared image
+is read-only. Parent reviews/commits/integrates; native Astra closes the findings;
+parent verifies the final committed replay and regression before main.

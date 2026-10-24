@@ -59,3 +59,30 @@ was absent, not evidence that later strengthened assertions individually failed.
 Record exact source SHA and commands; collect full actual outputs before claiming
 success. Parent and an independent native Astra reviewer must approve the final
 committed implementation. No unresolved blocker is accepted as complete.
+
+## Independent review at `9d37008`
+
+Native Astra reviewed the committed correction checkpoint and found five P2
+blockers. The 55/55 focused run and deterministic replay are checkpoint evidence,
+not approval of the final evaluator:
+
+1. Saved reports can assert success alongside failed criteria, or attach
+   measurements to missing outcomes. Validate derived success, fixed categorical
+   and reason values, missing-outcome invariants and every per-task aggregate.
+   Preserve explicit applicability when an outcome is absent.
+2. A caller-selected fresh state directory can forget run identity while Manager
+   reuses the old request ID under changed configured defaults. Bind each run to
+   a canonical Manager-owned registry and lock independent of that directory.
+3. Deletion counts as a change but cannot prove a required artifact exists.
+   Preserve deletion evidence for file-retention checks and separately establish
+   required-artifact presence.
+4. Execution failure alone does not prove a file constraint was lost. Grade
+   preservation independently from execution status; unavailable evidence is
+   unknown and overall task success remains false.
+5. CLI malformed-JSON and enum errors can echo input content. Emit bounded generic
+   errors and prove private sentinel values never appear on stdout/stderr.
+
+Explicit task-success count/rate deltas are a small usability improvement, not an
+additional blocker. Remove the minor extra EOF blank line in the incomplete
+fixture. A dedicated Sol correction unit owns these changes; Astra must review
+the resulting committed checkpoint and focused evidence before closure.
