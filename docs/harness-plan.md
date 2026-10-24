@@ -313,3 +313,9 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   fast-forwarded to the reviewed integration base. It also owns the necessary
   Manager internal admission interface in that serialized unit. This avoids
   competing writers and repeated dependency handoffs under the native thread cap.
+- Parent preflight on committed `86a405f` reproduced an existing offline-material
+  regression introduced by optional descriptions: normalization inserted an empty
+  description, which a second validation rejected. The lead made the single-line
+  fix to omit an absent optional field, within the small-change exception.
+  The original material test failed with `Invalid offline material description`;
+  the existing artifact/material plus capability suites then passed 14/14 on gram.

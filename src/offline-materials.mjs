@@ -116,7 +116,7 @@ export function validateOfflineConfig(raw = {}, configDir) {
     const collision = item.collision ?? 'reject';
     if (!['reject', 'overlay-lfs', 'submodule'].includes(collision)) throw new Error('Invalid material collision policy');
     if (collision === 'submodule' && !COMMIT.test(item.submoduleCommit || '') || collision !== 'submodule' && item.submoduleCommit !== undefined) throw new Error('Invalid submodule commit pin');
-    return { id: item.id, description: item.description || '', manifestPath: path.resolve(configDir, item.manifestPath), manifestSha256: item.manifestSha256, baseCommit: item.baseCommit, destination, collision, ...(item.submoduleCommit ? { submoduleCommit: item.submoduleCommit } : {}) };
+    return { id: item.id, ...(item.description !== undefined ? { description: item.description } : {}), manifestPath: path.resolve(configDir, item.manifestPath), manifestSha256: item.manifestSha256, baseCommit: item.baseCommit, destination, collision, ...(item.submoduleCommit ? { submoduleCommit: item.submoduleCommit } : {}) };
   });
   const dirs = materials.map(x => x.destination.toLowerCase());
   for (let i = 0; i < dirs.length; i++) for (let j = i + 1; j < dirs.length; j++) if (dirs[i] === dirs[j] || dirs[i].startsWith(`${dirs[j]}/`) || dirs[j].startsWith(`${dirs[i]}/`)) throw new Error('Material destination collision');
