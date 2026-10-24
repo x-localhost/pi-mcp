@@ -200,3 +200,10 @@ Parent's additional committed-source check is included in the same bounded unit:
 live must reject dirty/untracked executable harness paths before initialization,
 not merely record HEAD while running modified code. This extends the existing
 provenance contract; it does not guard unrelated docs, reports or node_modules.
+
+Review-fixes handoff: Sol completed 62/62 focused tests with no fail/skip/cancel,
+then parent reviewed and committed `f8a7929`, integrated as
+`acd9d63a680283eed8006a2e4afd313851126b1e`. Before closure review, native Sol and
+Astra are completed and there are no active Claude bridge jobs. Reuse native
+`/root/harness_design` for read-only closure against this committed source while
+parent runs final replay/full regression in its existing isolated final root.
