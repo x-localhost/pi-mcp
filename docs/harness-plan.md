@@ -276,3 +276,27 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   its standalone module/adapter tests against the committed interface now;
   manager cleanup wiring and actual integration remain serialized after runtime.
   This keeps useful independent work moving without copying dirty dependencies.
+
+### Independent implementation review and correction units
+
+- Workflow is committed at `619b388`; its remote tests passed 18/18, with
+  existing cleanup checks 3/3. Runtime/tools and workflow are now integrated.
+- Native Astra review of `0985441` found session seal admission/recovery races,
+  lost continuation instructions, idle-progress false positives, incorrect retry
+  identity, and review attestation acceptance/idempotency gaps. All are required
+  corrections before the final regression and main integration.
+- At correction assignment, workflow and runtime implementers are completed,
+  the independent reviewer has completed, and Claude bridge active jobs are zero.
+  Runtime Sol resumes in `harness-runtime-fixes`, branch
+  `codex/harness/runtime-fixes`, base `619b388`, owning manager, worker, session
+  transition, associated tests and report. Tools Sol resumes in
+  `harness-observation-fixes`, branch `codex/harness/observation-fixes`, same base,
+  owning policy extension, context policy, observation, their tests and report.
+- Contract: tools emits content-free actual assistant progress and retains all
+  authoritative user instructions; runtime limits idle checks to active Pi and
+  carries a bounded continuation ledger across fresh sessions. No shared source
+  writes. Both run targeted RED/GREEN on gram, without provider endpoints.
+  Parent integrates serially, then requests Astra review of corrections and the
+  committed workflow, runs the full suite and isolated mock internal profile.
+- Evaluation remains blocked on the already pending narrow bridge Git permission
+  decision; no substitute model or alternate execution route is authorized.
