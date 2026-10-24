@@ -1,29 +1,29 @@
 ## 현재 상태
 
-- 날짜: 2026-10-24 (Asia/Seoul). 하네스 검토의 안전성·실행·관측·순차 워크플로 보완을 구현·검증했음. **평가 러너는 권한 확인 대기라 미구현**이며 전체 요청을 모두 완료했다고 주장하지 않음.
-- 최종 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main`. 작업 브랜치/worktree: `codex/harness/integration`, `/Users/leebw/workspace/claude/pi-mcp-worktrees/harness`. 시작 main: `52a13358c175950b12dec31f1eb5f0f421129cc2`.
-- 기록 시점 HEAD: `11a479b3508832cffd0f635cd198c628265e79cf` (별도 handoff 커밋 직전). 최종 실행 소스: `661a898e715ac16eb80224b880a3be8c7371cd93`; 이후 변경은 문서뿐임. clean main fast-forward용 검증 완료.
-- 경로/저장소: file URI를 경로 승인 전에 거부하고, 저장소 용량 계산은 심볼릭 링크 대상을 따라가지 않음.
-- 승인 MCP: 해당 모드에서 쓰는 서버를 병렬 초기화하고 공통 시작 한도·정상 호출 한도·실패 연결 정리를 분리.
-- 완료 판정: 버전 있는 인수 계약과 verifier 선택을 후속 작업에 상속. 실행·검증·인수를 분리하고 최종 코드/계약 digest와 판정 증거를 연결. 선언된 이미지 내 grader 파일의 전후 해시·소유권 검사 추가.
-- 독립 리뷰: 불변 코드에서 별도 읽기 전용 worktree와 새 대화를 시작. 승인·거절·재요청은 digest에 묶이며 오래된 승인 재요청이 철회를 취소하지 않음. caller 판정이지 인증된 사람/신뢰 grader 인증은 아님.
-- 긴 작업: 필수 사용자 지시와 혼합 tool-result/user 블록 보존, 도구 호출/결과 묶음 단위 문맥 정리. 새 세션으로 코드·제약·정확한 제한 크기 지시를 넘기고 이전 세션을 봉인. 원시 기록 초과가 완료 코드를 무효화하지 않음.
-- 이미지가 필요하거나 과거 이미지 여부를 모르면 fresh rollover를 거부함. 이미지 이관은 구현하지 않았으며 조용히 누락하지 않음. 일반 지시 ledger 32개/1MB, fresh handoff 항목10KB/전체20KB 제한.
-- 관측: capability API 포함 MCP 도구18개. 내용 없는 도구/모델 호출/압축/진행 이벤트, 생존 heartbeat와 실제 진행 구분, 선택적 idle/연속 실패 중단. 고정 relay/gateway까지 진단 UUID 연결.
-- Pi 내부 SDK의 실제 HTTP 재시도 수는 알 수 없음. 확장 ID는 논리 호출, gateway ID는 관측한 유입 요청이며 반복 표시는 제한된 메모리 기준 진단임. 본문·인증값을 추적 데이터에 넣지 않음.
-- 순차 워크플로: 최대16단계의 영속 계획, 정확한 요청 내용 대조, 잠금 내 인수 조건 확인과 제출, 취소 복구, 정리 참조 보호. 응답 하나라도 사용량이 없거나 잘못되면 해당 예산 차원의 후속 진행을 막음. 단계 간 관측 예산이며 진행 중 초과 가능.
-- 독립 Astra 최종 검토 승인. 초기 검토의 세션/승인/복구/지시 보존 문제와 최종 혼합 메시지·relay 헤더 누락을 수정. 네이티브 thread 한도로 별도 Sol tester를 재활성화하지 못해 부모가 원격 회귀를 수행했음.
-- 최종 `661a898` 새 이미지에서 **322/322**, 15 suites, 실패·취소·스킵0, 253080ms. 앞선 `c52b85a`의320/320과 구별하며 최종 코드 전체를 다시 실행했음.
-- 실제 격리 프로필: Pi 읽기/도구·재연결·followup·취소, 새 리뷰와 동일 코드 digest, 승인/철회/재요청, rollover/봉인 통과. source/review/rollover의 논리 호출6개를 gateway 기록과 연결.
-- 보안 수용 검사: UID1000, network none, read-only root, capability0, no-new-privileges, seccomp/LSM, TCP/UDP/DNS/AF_VSOCK 차단, 소켓 변조·proxy override·gateway 누락 시 시작 거부; 금지 서비스 요청0.
-- 미완료 평가 단위: Sonnet5 bridge job `task-834e646b-d1c9-4531-949f-437df7ae20a8`이 첫 Git 신원 확인 명령의 승인 거부로 파일 변경 전에 종료. 정확한 모델 확인됨. 터미널 completed는 과제 완료가 아니며, 동일 작업을 다른 모델/명령으로 우회하지 않음.
-- 필요한 사용자 결정: 이미 보낸 작업 폴더 한정 읽기 전용 Git 허용 목록 추가 질문의 답변. 제공 AGENTS의 승인 거부 우회 금지 규칙 때문에 필요. 승인 시 전역 설정 보호 절차와 브리지 캐시/재시작 여부를 명시해 진행해야 함. 아직 설정 변경·브리지 재시작 없음.
-- 평가 다음 단계: 허용 범위를 승인받은 뒤 기존 Sonnet 작업을 정해진 역할로 재개 → 버전 과제 집합/오프라인 replay grader/비교 CLI → gram RED/GREEN → 독립 검토·통합. 실제 유료/사내 모델 평가는 별도 명시 승인 필요. 현재 테스트로 과제 해결 성능을 주장하지 않음.
-- 원격 작업 컨테이너·네트워크·볼륨·이미지 태그·소스/설정·임시 인증서 키 정리 확인. 공유 Docker build cache는 유지. gram `/tmp/pi-harness-regression-evidence-20261024`에 로그/검증 스크립트/메타데이터18개 보존. 로컬 기존·검토 worktree 유지.
-- 근거: [검증 기록/정확한 명령](docs/harness-regression.md), [계획/설계 결정](docs/harness-plan.md), [기능·제약 안내](docs/harness-runtime.md), [워크플로 운영](docs/harness-workflow.md). 개별 RED/GREEN 보고서는 검증 기록에서 연결.
-- 기존 운영 조건 유지: Linux `/proc`·`flock` runtime, Docker/Compose>=2.30 격리 프로필. 실제 사내 API/인증/CA 수용과 사용자별 OS 격리는 별도. live MCP/global 설정, push, 배포, 게시, 실제 사내 모델 호출 없음.
+- 날짜: 2026-10-24 (Asia/Seoul). 이전 하네스 기능 보완에 이어 평가 러너 구현·오프라인 평가·검토·검증을 완료했음. 평가 관련 구현 차단 사항 없음.
+- 반영 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main`. 작업 브랜치/worktree: `codex/evaluation/integration`, `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation`. 시작 main: `edff46ff3ca260a73cf8e6a6166d6080ca484b80`.
+- 기록 시점 HEAD/작업 커밋: `ca1feb2f73363bac49bdb9643adc9b05f484b23b` (이 별도 handoff 커밋 직전). 최종 검증 소스: `27c5eb22bcb18b6f0f2d88c891ff52ffdde8faa1`; 평가 구현: `acd9d63a680283eed8006a2e4afd313851126b1e`. 이후 변경은 문서뿐임.
+- 평가 기능: 버전 과제 10개, 독립 증거 판정, 코드/계약/과제/설정 식별자, 재생·비교 CLI, 제한 시간과 정확한 실행 재시도, 실제 Manager/fake-Pi 결과를 오프라인 기록으로 내보내는 경로.
+- 판정 보완: 원자료와 보고서 성공·집계의 일관성 검사, 누락 결과의 분모 유지, 필수 파일 존재와 삭제 구분, 실행 성공과 파일 보존 분리, 비공개 입력을 노출하지 않는 오류, 변경된 실행 소스의 live 시작 거부.
+- 재시도 상태는 Manager의 `stateDir/evaluation-runs`에 고정됨. 호환용 `--state-dir`을 바꿔도 기존 run ID의 설정·과제·코드 바인딩을 우회하지 못함.
+- gram의 커밋 소스 전체 회귀 **384/384**, 15 suites, 실패·취소·스킵0, exit0, 257310.363567ms. 평가 전용 **62/62**와 실제 fake-Pi CLI live→bundle→replay 통과.
+- 독립 Astra가 `73c42f7`의 평가 구현을 승인했으며 이후 평가 구현은 동일함. 전체 회귀에서 드러난 기존 준비 파일 JSON 읽기 경쟁은 테스트 네 줄로 수정, 영향 검사 6개를 5회 모두 통과한 뒤 전체 회귀를 다시 실행했음. 최초 383/384 실패도 보존.
+- 합성 baseline은 정상3/10, 의도한 부정·미확인7/10. regressed와 incomplete는 각각2/10이며 변경 과제와 누락·불완전 실행을 정확히 구분함. 반복 결과 byte-identical. 이 수치는 실제 모델 해결률이 아님.
+- 제한: 제공 증거의 일관성을 검사하며 출처를 암호학적으로 인증하지 않음. 파일 보존은 전체 API/지시 의미 보존을 뜻하지 않고, 재개 지표는 요청→job 멱등성임. Manager가 충분히 관찰하지 못한 재개 증거는 unknown 유지.
+- 실제 유료·사내 모델 성능은 측정하지 않음. 별도 live 평가에는 일치하는 과제 저장소·verifier·허용된 provider와 명시적 실행 승인이 필요함. 외부 model/auth/agent 파일 내용은 설정 fingerprint가 직접 고정하지 않으므로 필요하면 별도 고정해야 함.
+- 원격 작업 컨테이너·이미지 태그·소스/빌드 폴더5개 정리 확인. gram `/tmp/pi-harness-evaluation-evidence-20261024`에 로그/보고서/명령/메타데이터/정리 기록69개(체크섬 포함), 디렉터리0700·파일0600 보존. 이전 하네스 증거18개는 해시 동일.
+- 로컬 임시 조정 파일과 전용 bridge 설정은 제거. 기존·검토 worktree는 보존. live bridge 설정 SHA256·0644 권한은 시작과 동일하며 live MCP/global 설정·push·게시·배포 변경 없음.
+- 기존 하네스 런타임은 main 기준과 동일함: 인수 계약, 독립 리뷰, 세션 교체, 문맥·관측, 순차 워크플로와 격리 Pi 수용 검증은 [이전 기록](docs/harness-regression.md) 참조. Linux `/proc`·`flock` 등 운영 조건은 유지.
+- 정확한 명령·모델 역할·RED/GREEN·실패 이력·증거: [평가 검증](docs/evaluation-verification.md), [계획](docs/evaluation-plan.md), [독립 검토](docs/evaluation-review.md), [사용법/제약](docs/harness-evals.md).
+- 통합 절차: 이 handoff를 별도 커밋한 뒤 원래 main checkout의 브랜치·HEAD·tracked/untracked clean을 다시 확인하고 `--ff-only`로 반영. 필수 추가 구현·검증은 없으며 실제 모델 벤치마크는 별도 범위임.
 
 ## 작업 기록
+
+### 2026-10-24 — 하네스 평가 구현 및 오프라인 평가 완료
+- 버전 과제·증거 grader·재생/비교·live 기록 경로와 정확한 재시도 상태 구현, 독립 검토 지적과 기존 테스트 읽기 경쟁 수정.
+- 최종 소스 `27c5eb2`: 전체384/384, 평가62/62, 독립 Astra 승인, 합성 재현/회귀 감지와 fake-Pi 왕복 통과. 실제 모델 성능 수치가 아님.
+- 작업 `ca1feb2`; [평가 검증](docs/evaluation-verification.md)에 실패 이력·제약·원격 증거69개 기록. 작업 자원 정리, live/global 설정 보존.
+- 별도 handoff 커밋 후 clean local main fast-forward. 이전 평가 권한 대기 상태는 해소되었으며 필수 미완료 항목 없음.
 
 ### 2026-10-24 — 하네스 기능 보완과 최종 회귀
 - 경로/저장소·MCP 시작·인수 계약·독립 리뷰·세션 교체·관측/추적·순차 워크플로 구현 및 검토 지적 수정.
