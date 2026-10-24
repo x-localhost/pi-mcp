@@ -9,6 +9,9 @@ const protectedPart = part => ['.git', '.pi-mcp-policy'].includes(part.toLowerCa
 
 export async function confinedPath(root, candidate, mayCreate = false) {
   if (typeof candidate !== 'string' || !candidate || candidate.includes('\0')) return false;
+  // Pi's file tools normalize file URLs with fileURLToPath after this policy
+  // check. A URI must never be interpreted as a worktree-relative filename here.
+  if (/^file:/i.test(candidate)) return false;
   // Pi's path resolver strips these prefixes/whitespace after tool authorization.
   // Reject them so validation and the eventual tool resolve the same filename.
   if (/^[@~]|[^\S\x20\x09\x0a\x0d]|[\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]/u.test(candidate)) return false;

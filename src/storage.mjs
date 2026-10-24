@@ -14,7 +14,14 @@ export async function scanState(root, { maxStateBytes = 4 * 1024 * 1024 * 1024, 
       if (depth > 0 && error?.code === 'ENOENT') continue;
       throw error;
     }
-    if (st.isSymbolicLink() || !st.isDirectory() && !st.isFile()) throw new Error('Unsafe state entry');
+    if (st.isSymbolicLink()) {
+      // Account only for the link itself. Following it could escape the state
+      // root or turn a repository symlink into an admission/health failure.
+      bytes += st.size;
+      if (!Number.isSafeInteger(bytes)) throw new Error('State size overflow');
+      continue;
+    }
+    if (!st.isDirectory() && !st.isFile()) throw new Error('Unsafe state entry');
     if (st.isFile()) { bytes += st.size; if (!Number.isSafeInteger(bytes)) throw new Error('State size overflow'); continue; }
     try {
       for await (const item of await fs.opendir(file)) {
