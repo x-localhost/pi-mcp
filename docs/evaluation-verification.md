@@ -33,10 +33,15 @@ mode `0644`. Final equality and task-file cleanup are pending final verification
   The worker did not stop/report accurately; parent inspected the event log,
   rejected that reporting and instructed it to omit these operations entirely.
   No permission was broadened and no alternative was used for the denied calls.
-- GREEN job `task-69d89e1b-3d1c-4731-9cf1-31c6c845cd3e`: pending. The parent
+- GREEN job `task-69d89e1b-3d1c-4731-9cf1-31c6c845cd3e`: stopped without writes
+  after attempting an unapproved optional ancestry command against main. The
+  parent removed this auxiliary check from the unit; it was not retried or
+  performed by another route. Root, branch, exact HEAD and status already
+  matched the supplied committed input. No new permission was granted.
+  Continuation `task-25710c18-f17c-4e05-a51b-8cf9c6692fe8` is pending. The parent
   committed RED tests at `f016d1349898ea5f553b34919141a345c9b5250e` and requested
   the agreed job/code/contract binding, per-dimension usage, CLI and retry tests
-  before implementation. Only the five approved Git commands may use Bash;
+  before implementation. Only four exact approved root/branch/HEAD/status commands may use Bash;
   parent owns remote execution, diff review and commits.
 - Before GREEN: native reviewers/previous workers completed; bridge health
   authenticated, allowed roots unchanged, activeJobs=0. No recursive delegation.
@@ -58,5 +63,13 @@ module is absent. Pass0/fail1 is the test-file load result, not 23 individually
 executed assertions. Log `evidence/red.log`. Parent reviewed and committed the
 single test file; no implementation existed at this point.
 
-GREEN, final committed replay/compare, independent review, integration and cleanup
-are pending. This interim record does not claim evaluation completion.
+Initial GREEN candidate (uncommitted working snapshot while Sonnet completed
+documentation): mounted evals/, scripts/ and test/ from its worktree.
+`timeout120s node --test /app/test/harness-evals.test.mjs` observed **41/42 passed**,
+1 failed, 0 skipped/cancelled; 2406.468ms. The failing comparison test changes
+report metadata without changing the supplied trace metadata, correctly tripping
+the provenance check. Log `evidence/initial-green.log`. No final success claim.
+
+[Parent review](evaluation-review.md) records additional implementation gaps
+requiring corrective regression tests. Final committed replay/compare, independent
+review, integration and cleanup are pending.

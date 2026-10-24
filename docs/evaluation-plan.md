@@ -122,3 +122,26 @@ validity amendments, incorporated above: malformed-versus-unsuccessful inputs,
 independent evidence, precise provenance, stable denominators, exact retries and
 constructed evidence with explicit usage/event availability. Review was read-only;
 no unresolved design objections remain before the tests-only handoff.
+
+## Initial implementation review and corrective unit
+
+The first GREEN candidate's parent-run remote focused suite produced41/42 passed
+on gram; one comparison fixture conflicts with its trace provenance. Parent code
+review also found unfinished live evidence collection, runtime contract binding,
+crash-safe run locking, configuration identity, bounded CLI guards and strict
+report comparison. Details are in [evaluation-review.md](evaluation-review.md).
+These are implementation defects/gaps, not a permission issue. The corrected
+Sonnet job writes normally under its existing four approved identity commands.
+
+After its terminal handoff, parent will commit the reviewed initial candidate on
+the isolated task branch (not main) and integrate it with the review record. A
+GPT-6 Sol implementation unit will own the substantial schema, transaction and
+concurrency corrections, with targeted remote RED/GREEN and a real Manager/fake-Pi
+roundtrip. This routing follows the global rule for substantial schema and
+concurrency work after the bounded Sonnet attempt. Scope remains evals/, the
+evaluation CLI/tests/fixtures and evaluation guide/report; no production runtime
+or package/global edits. Each writer uses its own committed-base worktree.
+
+Parent retains final review, commits and remote regression; independent native
+Astra must review the corrected committed diff. Only clean verified integration
+may fast-forward local main.
