@@ -25,7 +25,9 @@ worktree-scoped read-only Git identity/status/ancestor commands. Model, allowed
 roots, restricted/dontAsk mode and existing denies stayed unchanged. No shared
 MCP restart or live/global settings edit occurred. Live bridge configuration
 SHA256 before work: `243ce60a6ac364e364e241e49b2b9ff38727fecbe3e393959872d4212b4dcb43`,
-mode `0644`. Final equality and task-file cleanup are pending final verification.
+mode `0644`. After all bridge jobs ended, parent verified the same hash and mode,
+retained `evidence/permission-manifest.json` on gram and removed the private task
+configuration, client and prompts. No shared connection restart was needed.
 
 - RED job `task-c3ee192d-a9fe-48f0-9870-5596b7babf6c`: exact
   `claude-sonnet-5` identity observed; terminal completed, tests only. Two
@@ -38,7 +40,11 @@ mode `0644`. Final equality and task-file cleanup are pending final verification
   parent removed this auxiliary check from the unit; it was not retried or
   performed by another route. Root, branch, exact HEAD and status already
   matched the supplied committed input. No new permission was granted.
-  Continuation `task-25710c18-f17c-4e05-a51b-8cf9c6692fe8` is pending. The parent
+  Continuation `task-25710c18-f17c-4e05-a51b-8cf9c6692fe8` completed, exact
+  Sonnet5 identity confirmed, zero permission denials. It self-reported one
+  unnecessary `true` command outside the scoped command list; no side effects.
+  Parent corrected its inaccurate claim that strengthened tests preceded code: the
+  original RED did, but the later42-case strengthening followed the modules. The parent
   committed RED tests at `f016d1349898ea5f553b34919141a345c9b5250e` and requested
   the agreed job/code/contract binding, per-dimension usage, CLI and retry tests
   before implementation. Only four exact approved root/branch/HEAD/status commands may use Bash;
@@ -73,3 +79,30 @@ the provenance check. Log `evidence/initial-green.log`. No final success claim.
 [Parent review](evaluation-review.md) records additional implementation gaps
 requiring corrective regression tests. Final committed replay/compare, independent
 review, integration and cleanup are pending.
+
+## Corrective handoff
+
+Reviewed initial candidate committed as `0644560` in the bridge worktree and
+cherry-picked as `1c27ed5` on the integration branch; main remains untouched.
+The initial candidate is intentionally not marked ready. Native GPT-6 Sol
+`/root/harness_runtime` owns the isolated corrective worktree at this committed
+base and is adding targeted RED regressions for the six parent review findings.
+Substantial schema/transaction/concurrency corrections prompted this routing;
+there is no outstanding bridge permission blocker and no denied operation is
+being executed by another route. Parent owns final remote replay/regression and
+native Astra owns independent review of the corrected committed source.
+
+Targeted corrective RED used base `1c27ed5` with new test-only assertions on gram:
+`node --test test/harness-evals-corrections.test.mjs`, in the pinned image with
+network disabled and task-specific mounts. Observed **0/5 passed, 5 failed**:
+runtime contract digest, unavailable artifact evidence, arbitrary result leakage,
+unknown CLI flag and live identity checks. Log:
+`/tmp/pi-harness-evaluation-corrections-20261024/red.log`. These are actual
+before-fix failures; final GREEN and later test additions must be recorded
+separately.
+
+An additional before-fix run selected
+`--test-name-pattern='crash-stale|actual fake Pi'` in the same corrective test
+file. Observed **0/2 passed, 2 failed**: stale run locking blocked recovery, and
+the real Manager/fake-Pi result had no replayable trace. These failures preceded
+the corresponding state/evidence implementation changes.

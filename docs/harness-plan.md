@@ -363,3 +363,11 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
 - Evidence, exact commands, source/image identities, corrected failures, honest
   limits and cleanup are in [harness-regression.md](harness-regression.md).
   Parent owns final documentation/handoff commits and clean local-main merge.
+
+### Subsequent evaluation work
+
+The evaluation permission decision above describes the original harness handoff.
+The user's later instruction authorized the scoped continuation. Its current
+scope, implementation and observed verification are recorded in
+[evaluation-plan.md](evaluation-plan.md) and
+[evaluation-verification.md](evaluation-verification.md).

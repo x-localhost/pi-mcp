@@ -141,7 +141,11 @@ explicitly distinguish them from pre-implementation RED runs.
 
 ## Pending evaluation and limits
 
-The reproducible task-evaluation runner/task set remains **unimplemented**.
+At this earlier harness handoff, the reproducible task-evaluation runner/task set
+remained **unimplemented**. Subsequent authorized evaluation work and its actual
+verification are recorded in [evaluation-verification.md](evaluation-verification.md).
+The following paragraph preserves the original handoff state.
+
 The explicitly selected Sonnet5 bridge job
 `task-834e646b-d1c9-4531-949f-437df7ae20a8` verified its model identity but stopped
 before any edit when its first Git identity command was denied by the bridge
