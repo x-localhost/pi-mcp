@@ -44,17 +44,26 @@ input. The exact Sonnet model and terminal result must be observed again.
 2. Strict bounded trace/outcome input: task/run identity, source commit and config
    identity, execution, code digest, verifier/artifact/review evidence, retained
    constraint identifiers, resume request/job events, timing and measured usage.
-   Reject malformed, extra, conflicting, duplicate or unbounded records. Unknown
+   Reject malformed/extra fields, unbounded records and duplicate record IDs.
+   Well-formed stale evidence, false completion and one resume request producing
+   multiple jobs are graded failures. Repeated submissions mapping a request to
+   the same job are valid idempotency evidence. Unknown
    data stays null/unknown and never silently passes a required criterion.
 3. A pure offline grader produces per-criterion outcomes and failure categories,
    aggregate task success, instruction retention and resume correctness. Metrics
    include denominators/coverage; latency and usage aggregate only real observed
-   values with unknown counts. Report versions and suite/grader/source/config
-   identity. JSON output is deterministic for the same inputs; no ambient time,
+   values with unknown counts. Report versions, suite content digest, grader identity, selected task IDs,
+   `harnessCommit`, `taskBaseCommit` and a secret-free configuration fingerprint.
+   Bind verification/review evidence to job, code and contract digests. Retention
+   uses suite-owned fixed evidence predicates, never candidate assertions alone.
+   Offline grading checks evidence consistency, not authenticity. JSON output is deterministic for the same inputs; no ambient time,
    provider, filesystem/network reads or arbitrary executable graders.
 4. A comparison CLI refuses incompatible suite/grader/task/config provenance by
    default, names missing coverage and reports candidate-minus-baseline changes.
-   Source commits may differ intentionally. Matching synthetic positive and
+   Source commits may differ intentionally. Task success uses the complete
+   selected task set, including missing outcomes. Retention/resume report
+   applicable and observed counts. Compare identical task coverage by default;
+   latency/cost deltas use matched observed cases and disclose success differences. Matching synthetic positive and
    negative fixtures test the grader; they are labelled synthetic and are not
    presented as before/after model performance.
 5. Offline is the default and needs no credentials or endpoint. Live execution is
@@ -63,11 +72,16 @@ input. The exact Sonnet model and terminal result must be observed again.
    Manager/Pi service; do not introduce an arbitrary command/URL executor or
    silently start it during replay/compare. Record actual runtime evidence and
    unavailable model/usage data truthfully. Stable request IDs prevent duplicate
-   task submission when the operator retries the same run. No automatic commits,
+   task submission when the operator retries the same run. Bind the run ID to
+   suite/tasks, repository commit, configuration and payload; reject changed
+   identity. Persist/reconcile submitted job IDs, bound waiting and return
+   incomplete/running status truthfully. No automatic commits,
    deployment or review approval. Test the adapter with local fake Pi/Manager only.
 6. CLI writes a bounded result only to an explicitly selected destination using
    owner-private, non-overwriting output; stdout is available. Reports do not copy
-   credentials, raw private sessions, auth headers or tool output bodies.
+   credentials, raw private sessions, auth headers or tool output bodies. Export
+   constructed evidence only, preserve event gaps and require usageAvailability
+   before reporting usage. Truncated history cannot prove resume correctness.
 
 ## Units and checks
 
@@ -100,3 +114,11 @@ existing affected checks or a full suite if integration concerns justify it.
 Record every command, actual result, limits and final source SHA. Commit docs and a
 separate bounded root handoff, then fast-forward clean local main. Preserve evidence
 while removing only task-owned remote resources and private permission files.
+
+## Independent design review
+
+Native Astra reviewer `/root/harness_design` approved the small approach with six
+validity amendments, incorporated above: malformed-versus-unsuccessful inputs,
+independent evidence, precise provenance, stable denominators, exact retries and
+constructed evidence with explicit usage/event availability. Review was read-only;
+no unresolved design objections remain before the tests-only handoff.
