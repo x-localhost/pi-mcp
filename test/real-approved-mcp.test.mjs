@@ -45,7 +45,7 @@ test('real Pi 1.4.0 registers approved MCP at session_start and executes a pinne
     rpc.on('event', event => { if (events.length < 20) events.push(event); });
     let ready;
     for (let i = 0; i < 100; i++) {
-      ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse, () => null);
+      ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse).catch(() => null);
       if (ready) break;
       if (child.exitCode !== null) break;
       await sleep(100);

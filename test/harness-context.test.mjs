@@ -30,7 +30,7 @@ test('real Pi aborts impossible mandatory context before any provider request', 
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
     rpc = new RpcClient(child.stdout, child.stdin);
     let ready;
-    for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse, () => null); if (ready || child.exitCode !== null) break; await sleep(100); }
+    for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse).catch(() => null); if (ready || child.exitCode !== null) break; await sleep(100); }
     assert.ok(ready, stderr);
     await rpc.request('set_model', { provider: 'mock', modelId: 'mock' });
     const settled = rpc.waitFor('agent_settled', 10_000); settled.catch(() => {});
@@ -80,7 +80,7 @@ test('real Pi drops a complete two-tool group and observation omits raw call dat
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
     rpc = new RpcClient(child.stdout, child.stdin);
     let ready;
-    for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse, () => null); if (ready || child.exitCode !== null) break; await sleep(100); }
+    for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse).catch(() => null); if (ready || child.exitCode !== null) break; await sleep(100); }
     assert.ok(ready, stderr);
     await rpc.request('set_model', { provider: 'mock', modelId: 'mock' });
     const settled = rpc.waitFor('agent_settled', 10_000); settled.catch(() => {});
@@ -130,7 +130,7 @@ test('real Pi reports logical calls and streaming progress without inventing inn
       child = spawn(process.execPath, [cli, '--mode', 'rpc', '--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve', '--offline', '--tools', 'read,grep,find,ls', '--session-dir', sessionDir, '--session-id', `retry-${failure}`, '-e', extension],
         { cwd: worktree, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_MCP_POLICY: policyFile, MOCK_API_KEY: 'test-only-key', PI_OFFLINE: '1', PI_TELEMETRY: '0', PI_SKIP_VERSION_CHECK: '1', DO_NOT_TRACK: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
       child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); }); rpc = new RpcClient(child.stdout, child.stdin);
-      let ready; for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse, () => null); if (ready || child.exitCode !== null) break; await sleep(100); }
+      let ready; for (let i = 0; i < 100; i++) { ready = await fs.readFile(readyFile, 'utf8').then(JSON.parse).catch(() => null); if (ready || child.exitCode !== null) break; await sleep(100); }
       assert.ok(ready, stderr); await rpc.request('set_model', { provider: 'mock', modelId: 'mock' });
       const settled = rpc.waitFor('agent_settled', 12_000); settled.catch(() => {});
       assert.equal((await rpc.request('prompt', { message: 'Reply Hello.' })).data?.disposition, 'started'); await settled;
