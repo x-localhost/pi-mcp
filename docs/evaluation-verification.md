@@ -1,0 +1,62 @@
+# Harness evaluation verification — 2026-10-24
+
+## Scope and provenance
+
+Main base `edff46ff3ca260a73cf8e6a6166d6080ca484b80`; prior executable
+harness source `661a898e715ac16eb80224b880a3be8c7371cd93`.
+Integration branch `codex/evaluation/integration`, worktree
+`/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation`.
+The approved contract and independent Astra design review are in
+[evaluation-plan.md](evaluation-plan.md). Synthetic replay validates the grader's
+handling of supplied evidence; it does not measure agent/model task performance.
+No corporate or paid model endpoint is used by evaluation commands or tests.
+
+## Delegation and permissions
+
+The original Sonnet5 job `task-834e646b-d1c9-4531-949f-437df7ae20a8` was
+resumed in its original worktree after the user's instruction to proceed. Its
+historical bridge base remains `50a55ce`; the parent first fast-forwarded its clean
+worktree to the new committed plan `9acd63b`. Changes are reviewed against that
+actual input, not the bridge's historical broad diff.
+
+A short-lived stdio connection to the same installed bridge used its supported
+`CLAUDE_DELEGATE_CONFIG` override. A private task configuration added five exact
+worktree-scoped read-only Git identity/status/ancestor commands. Model, allowed
+roots, restricted/dontAsk mode and existing denies stayed unchanged. No shared
+MCP restart or live/global settings edit occurred. Live bridge configuration
+SHA256 before work: `243ce60a6ac364e364e241e49b2b9ff38727fecbe3e393959872d4212b4dcb43`,
+mode `0644`. Final equality and task-file cleanup are pending final verification.
+
+- RED job `task-c3ee192d-a9fe-48f0-9870-5596b7babf6c`: exact
+  `claude-sonnet-5` identity observed; terminal completed, tests only. Two
+  unnecessary commands (`echo $?`, task-worktree `git diff --stat`) were denied.
+  The worker did not stop/report accurately; parent inspected the event log,
+  rejected that reporting and instructed it to omit these operations entirely.
+  No permission was broadened and no alternative was used for the denied calls.
+- GREEN job `task-69d89e1b-3d1c-4731-9cf1-31c6c845cd3e`: pending. The parent
+  committed RED tests at `f016d1349898ea5f553b34919141a345c9b5250e` and requested
+  the agreed job/code/contract binding, per-dimension usage, CLI and retry tests
+  before implementation. Only the five approved Git commands may use Bash;
+  parent owns remote execution, diff review and commits.
+- Before GREEN: native reviewers/previous workers completed; bridge health
+  authenticated, allowed roots unchanged, activeJobs=0. No recursive delegation.
+
+## Remote checks
+
+All builds and test execution use gram, task root
+`/tmp/pi-harness-evaluation-20261024`. The Mac only coordinates agents, Git,
+file edits and transfer. Node `24.22.0-bookworm` and pinned project dependencies
+were built from the production Dockerfile as `pi-harness-evaluation:20261024`,
+image `sha256:7fcc16542bf77f822247fe72976bcec1035ace7ce3de12083f1edb683290a1e5`.
+The build used plan source `5d8b2b0`, whose executable runtime equals main.
+Test/replay source is mounted separately at each recorded committed checkpoint.
+
+Initial RED (2026-10-24): `node --test /app/test/harness-evals.test.mjs`, in a
+fresh disposable Docker container, network none, UID0, 2 CPUs, 2 GiB, PID limit256.
+Observed exit1, `ERR_MODULE_NOT_FOUND` for `/app/evals/errors.mjs`: the new feature
+module is absent. Pass0/fail1 is the test-file load result, not 23 individually
+executed assertions. Log `evidence/red.log`. Parent reviewed and committed the
+single test file; no implementation existed at this point.
+
+GREEN, final committed replay/compare, independent review, integration and cleanup
+are pending. This interim record does not claim evaluation completion.
