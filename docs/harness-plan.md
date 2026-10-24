@@ -337,3 +337,29 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   may traverse the chat relay, with duplicate/malformed handling still fail-closed
   and no arbitrary or credential header forwarding. Parent owns integration and
   fresh-image regression/profile reruns after the committed handoff.
+
+### Final verified state
+
+- Final executable source `661a898e715ac16eb80224b880a3be8c7371cd93` includes
+  all implemented safety/runtime/tools/workflow changes and review corrections.
+  Independent Astra closed its last finding and approved integration after the
+  parent checks. Fresh-image full regression passed **322/322**, 15 suites,
+  no failures/cancellations/skips. Actual isolated Pi acceptance passed all
+  boundaries and the new review/attestation/rollover/correlation probe.
+- Observation contract was narrowed to what pinned Pi can actually expose:
+  extension IDs describe logical calls/header hooks, gateway IDs describe observed
+  ingress, and bounded repeated-call flags are diagnostic. No physical SDK retry
+  counts or provider spend are inferred. The fixed chat relay preserves only the
+  validated UUID trio; gateway consumes it before upstream.
+- Source/context continuation preserves mandatory text and mixed tool-result/user
+  blocks. Required or unknown image context refuses fresh rollover, and bounded
+  handoff overflow refuses instead of truncating. Workflow uses the final atomic
+  Manager admission interface; the earlier prepare-then-submit design was revised
+  to recheck its gate under the same submit lock as actual admission.
+- The evaluation unit remains unimplemented after the bridge denial and pending
+  user permission decision. No model substitution, denied-command rerun, global
+  configuration change or live bridge restart occurred. Therefore the original
+  request to complete every improvement is not claimed fully complete.
+- Evidence, exact commands, source/image identities, corrected failures, honest
+  limits and cleanup are in [harness-regression.md](harness-regression.md).
+  Parent owns final documentation/handoff commits and clean local-main merge.
