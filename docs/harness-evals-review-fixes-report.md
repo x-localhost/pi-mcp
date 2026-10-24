@@ -1,6 +1,6 @@
 # Evaluation review fixes — 2026-10-24
 
-Worktree: `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-review-fixes` on `codex/evaluation/review-fixes`, committed input `9d370081e3c4f64b3c408cbdde23da8848162719`. Root, branch, HEAD and clean starting status were verified before edits. This unit remains uncommitted for parent review.
+Worktree: `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-review-fixes` on `codex/evaluation/review-fixes`, committed input `9d370081e3c4f64b3c408cbdde23da8848162719`. Root, branch, HEAD and clean starting status were verified before edits. At unit handoff this work was uncommitted for parent review. The parent subsequently committed `f8a7929` and integrated `acd9d63`; see [final verification](evaluation-verification.md).
 
 ## Changes
 

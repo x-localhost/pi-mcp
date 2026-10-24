@@ -1,5 +1,11 @@
 # Harness evaluation verification — 2026-10-24
 
+Final result: **384/384 tests passed**, evaluator-focused **62/62**, independent
+Astra source review approved. Synthetic replay, byte-identical repeat, regression
+comparison and fake-Pi live-to-replay integration passed. The measured scope is
+evaluator/harness correctness; no real model task-solving score is claimed.
+Final committed test source: `27c5eb2`. Earlier failed checkpoints remain below.
+
 ## Scope and provenance
 
 Main base `edff46ff3ca260a73cf8e6a6166d6080ca484b80`; prior executable
@@ -184,3 +190,60 @@ passed **6/6**, fail/cancel/skip0, exit0; durations 9547.870614, 9737.767936,
 10241.330375, 9454.348815 and 9585.152458ms. Their exact Docker script and logs
 are under the readiness evidence root. The failed checkpoint's complete reports,
 commands, metadata and regression log are preserved as `checkpoint-73c42f7`.
+
+## Final committed verification at `27c5eb2`
+
+The readiness correction was integrated as
+`27c5eb22bcb18b6f0f2d88c891ff52ffdde8faa1`, tree
+`ae6d38dfb8c78cb8b8264e6d9a2b74657c34c31c`. The evaluator's executable changes
+remain `acd9d63`; subsequent changes are the four readiness-test lines and
+coordination documents. Production `src/`, `internal-agent/`, package manifests
+and lockfile are identical to the main base. Parent reviewed the correction and
+`git diff --check` passed. Astra's approval at `73c42f7` therefore still covers
+the identical evaluator implementation; the parent reviewed the trivial test fix.
+
+Parent transferred `git archive 27c5eb22bcb18b6f0f2d88c891ff52ffdde8faa1` to the
+isolated final root and repeated the exact pinned-image replay and full suite.
+`timeout 540s node --test --test-concurrency=1 test/*.test.mjs` passed **384/384**,
+15 suites, failed/cancelled/skipped/todo0, exit0, **257310.363567ms**. Runtime
+and dependency image identity are recorded above; changed source and tests were
+mounted from this committed archive. No local test/build/install/service ran.
+
+Baseline, regressed and incomplete replay results, deterministic repetition and
+comparison all passed at the final source. Expected fixture task scores remain
+3/10, 2/10 and 2/10 respectively, with only `fix-null-check` changed by the
+regressed fixture. Intentional negative/unknown cases explain the other baseline
+outcomes. These percentages are **not model task-solving success rates**. Fixture
+provenance placeholders describe supplied traces; the executed grader's actual
+Git source is recorded separately in `final-metadata.json`.
+
+## Evidence, cleanup and remaining scope
+
+Consolidated private evidence on gram:
+`/tmp/pi-harness-evaluation-evidence-20261024` — **69 files including the checksum
+manifest**, 0700 directories and 0600 files. It includes initial RED/failed GREEN,
+both Sol units, five readiness repetitions, intermediate checkpoints, final
+reports, exact replay/regression scripts, source/image metadata and cleanup report.
+Every final evidence file was compared byte-for-byte before deleting its source;
+the consolidated SHA256 manifest was verified before cleanup and regenerated to
+include the cleanup report. Historical unit paths above identify where commands
+ran; their logs now live in this consolidated evidence directory.
+
+All five task source/build directories and the evaluation image tag were removed
+after confirming no container referenced the task image. Shared Docker build
+cache and unrelated resources were untouched. Prior harness evidence remains
+unchanged (18 files, checked by hash). Local source/review worktrees are retained.
+Private temporary bridge files were removed and the live bridge config still
+has its original SHA256 and 0644 mode. No live MCP/global settings, push,
+publication, deployment or paid/corporate model endpoint was changed or invoked.
+
+Evaluation implementation, offline evaluation and review are complete. Local main
+integration uses a final clean-checkout check and fast-forward only, after scoped
+documentation and a separate root handoff commit. No evaluator blocker remains.
+Actual model performance remains unmeasured: the ten bundled tasks are illustrative,
+and a matching task repository, verifiers and authorized provider are prerequisites
+for live model benchmarking. Caller-supplied evidence is checked for consistency,
+not cryptographic authenticity; file preservation and submission idempotency do
+not establish full API/instruction or session semantics. Missing evidence remains
+unknown. External model/auth/agent file contents must be pinned separately if
+their mutability matters to a later live comparison.

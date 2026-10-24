@@ -2,7 +2,9 @@
 
 Worktree: `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-corrections`
 Branch/base: `codex/evaluation/corrections` at committed `1c27ed55fc1f64b63443579992b7a4e4e1166bf4`.
-The unit remains uncommitted for parent review. No production `src/` file, global setting, live MCP, paid endpoint or external service was changed.
+At unit handoff this work was uncommitted for parent review. The parent subsequently
+committed `edb4694` and integrated `8c2f643`; see [final verification](evaluation-verification.md).
+No production `src/` file, global setting, live MCP, paid endpoint or external service was changed.
 
 ## Changed files
 

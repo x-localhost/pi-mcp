@@ -1,5 +1,9 @@
 # Harness evaluation unit -- GREEN implementation report
 
+Historical unit handoff: the parent subsequently committed this candidate as
+`0644560`, integrated it as `1c27ed5`, and resolved review findings in later units.
+Current integration and verification are in [evaluation-verification.md](evaluation-verification.md).
+
 ## Scope
 
 Owned files only: `evals/`, `scripts/evaluate-harness.mjs`,

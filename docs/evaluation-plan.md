@@ -1,5 +1,11 @@
 # Reproducible harness evaluation — 2026-10-24
 
+Completed implementation and verification: final source `27c5eb2`, full suite
+384/384, evaluator-focused 62/62, deterministic replay/comparison and independent
+Astra review. [Verification and retained evidence](evaluation-verification.md)
+record failed checkpoints, corrections, scope limits and cleanup. Final local
+integration is fast-forward only after the separate root handoff commit.
+
 ## Scope and authority
 
 The user asked to continue the remaining evaluation after the earlier bridge
