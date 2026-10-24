@@ -234,3 +234,28 @@ Trace injection requires an explicit internal gateway flag derived from the fixe
 profile, never inferred from an arbitrary user URL. Helpers must work with defaults
 when old fixtures omit optional fields. Both implementers confirm this interface
 before coding and notify the lead of necessary revisions; no overlapping edits.
+
+### Active assignments and workflow contract
+
+- Runtime `/root/harness_runtime` (native Sol high) and tools
+  `/root/harness_tools` (native Sol high) started from `50a55ce` in their recorded
+  worktrees. Evaluation bridge job `task-834e646b-d1c9-4531-949f-437df7ae20a8`
+  started from the same commit with explicitly requested Sonnet 5; final model
+  identity and completion still require verification. Combined active count: 3.
+- Evaluation worktree is bridge-owned under its state directory, branch
+  `codex/claude/834e646b-d1c9-4531-949f-437df7ae20a8`; permitted repository and
+  authenticated bridge health were confirmed immediately before delegation.
+- Workflow will use bounded immutable sequential stage definitions and explicit
+  create/status/advance/cancel operations. It stores intents before submission and
+  resumes by deterministic request ID. Review collection is allowed while source
+  acceptance awaits review; next implementation waits for the selected gates.
+- Workflow lock precedes submit lock. Prepare/revalidate source and persist intent
+  under submit lock, release it, then call Manager submission (which takes its own
+  lock). Cleanup reads workflow references under submit lock without taking a
+  workflow lock, matching both job IDs and request IDs. This protects children
+  created just before a crash that prevented recording their returned job ID.
+- Aggregate budget admission is between stages; a whole in-flight child can
+  overshoot. Unknown selected usage dimensions block. This limit is explicitly
+  reported, never advertised as a hard provider-spend cap. Cancel intent is durable
+  before delivery. Completed/cancelled workflow references remain until explicit
+  safe workflow release, preserving review and source evidence.
