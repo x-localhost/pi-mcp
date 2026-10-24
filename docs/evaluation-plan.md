@@ -207,3 +207,20 @@ then parent reviewed and committed `f8a7929`, integrated as
 Astra are completed and there are no active Claude bridge jobs. Reuse native
 `/root/harness_design` for read-only closure against this committed source while
 parent runs final replay/full regression in its existing isolated final root.
+
+## Readiness polling correction after full regression
+
+At committed checkpoint `73c42f7`, replay and independent Astra source review
+passed, but the full suite observed 383/384: a pre-existing real-Pi test parsed
+the readiness file between its creation and completed write. Production worker
+polling already tolerates this interval. Four test polling sites catch read
+errors but not JSON parse errors. Parent owns the four-line deterministic test
+correction directly because delegation would exceed the change, in dedicated
+worktree `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation-readiness`,
+branch `codex/evaluation/readiness`, base `73c42f7054810aba626ea2d3f26236210d6b8199`.
+Native Sol/Astra are completed; Claude jobs are terminal. No runtime change or
+new review design is required. Retain the observed failure, run both affected
+real-Pi test files repeatedly on gram, review/commit/integrate serially, then
+rerun the complete suite from that exact committed source. Parent owns isolated
+remote root `/tmp/pi-harness-evaluation-readiness-20261024`; the image is shared
+read-only and all providers remain local mocks in network-disabled containers.
