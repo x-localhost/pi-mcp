@@ -1,0 +1,175 @@
+[
+  {
+    "id": "fix-null-check",
+    "scenario": "successful_completion",
+    "prompt": "Fix the null check in the parser without changing its public API.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/parser.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "lint runs against the graded code digest." },
+      { "id": "constraint:preserve-public-api", "kind": "constraint", "description": "src/parser-api.mjs is reported unchanged." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/parser.mjs"],
+      "requiredVerifierIds": ["lint"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": ["preserve-public-api"],
+      "constraintEvidence": [{ "constraintId": "preserve-public-api", "path": "src/parser-api.mjs" }]
+    }
+  },
+  {
+    "id": "false-claim-complete",
+    "scenario": "false_completion",
+    "prompt": "Add input validation to the upload handler.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/upload.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "lint runs against the graded code digest." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/upload.mjs"],
+      "requiredVerifierIds": ["lint"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "preserve-auth-contract",
+    "scenario": "lost_constraint",
+    "prompt": "Refactor the session store without altering the authentication contract.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/session-store.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "unit tests run against the graded code digest." },
+      { "id": "constraint:preserve-auth-contract", "kind": "constraint", "description": "src/auth-contract.mjs is reported unchanged." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/session-store.mjs"],
+      "requiredVerifierIds": ["unit"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": ["preserve-auth-contract"],
+      "constraintEvidence": [{ "constraintId": "preserve-auth-contract", "path": "src/auth-contract.mjs" }]
+    }
+  },
+  {
+    "id": "resume-after-timeout",
+    "scenario": "duplicate_resume",
+    "prompt": "Resume the interrupted migration script after the timeout.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/migration.mjs is edited." },
+      { "id": "resume", "kind": "resume", "description": "Every resume request maps to exactly one job id." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/migration.mjs"],
+      "requiredVerifierIds": [],
+      "requiresReview": false,
+      "requiresResume": true,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "retry-flaky-build",
+    "scenario": "repeated_resume",
+    "prompt": "Retry the flaky build step and report the final status.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/build.mjs is edited." },
+      { "id": "resume", "kind": "resume", "description": "Every resume request maps to exactly one job id." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/build.mjs"],
+      "requiredVerifierIds": [],
+      "requiresReview": false,
+      "requiresResume": true,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "lint-clean-formatter",
+    "scenario": "stale_verification",
+    "prompt": "Clean up the formatter module and ensure lint passes.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/formatter.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "lint runs against the graded code digest." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/formatter.mjs"],
+      "requiredVerifierIds": ["lint"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "review-rate-limiter",
+    "scenario": "stale_review",
+    "prompt": "Add a rate limiter to the API gateway and obtain review approval.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/rate-limiter.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "unit tests run against the graded code digest." },
+      { "id": "review", "kind": "review", "description": "An independent review job approves this exact job and contract." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/rate-limiter.mjs"],
+      "requiredVerifierIds": ["unit"],
+      "requiresReview": true,
+      "requiresResume": false,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "optional-telemetry-cleanup",
+    "scenario": "missing_outcome",
+    "prompt": "Remove the unused telemetry module.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/telemetry.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "lint runs against the graded code digest." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/telemetry.mjs"],
+      "requiredVerifierIds": ["lint"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "long-running-batch-job",
+    "scenario": "unavailable_usage",
+    "prompt": "Optimize the long-running batch job for memory use.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/batch-job.mjs is edited." },
+      { "id": "verification", "kind": "verification", "description": "lint runs against the graded code digest." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/batch-job.mjs"],
+      "requiredVerifierIds": ["lint"],
+      "requiresReview": false,
+      "requiresResume": false,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  },
+  {
+    "id": "resume-across-session-gap",
+    "scenario": "event_gap_resume",
+    "prompt": "Resume the deployment workflow after a dropped connection.",
+    "criteria": [
+      { "id": "artifact", "kind": "artifact", "description": "src/deploy.mjs is edited." },
+      { "id": "resume", "kind": "resume", "description": "Every resume request maps to exactly one job id." }
+    ],
+    "expectedEvidence": {
+      "changedPaths": ["src/deploy.mjs"],
+      "requiredVerifierIds": [],
+      "requiresReview": false,
+      "requiresResume": true,
+      "requiredConstraintIds": [],
+      "constraintEvidence": []
+    }
+  }
+]
