@@ -319,3 +319,21 @@ before coding and notify the lead of necessary revisions; no overlapping edits.
   fix to omit an absent optional field, within the small-change exception.
   The original material test failed with `Invalid offline material description`;
   the existing artifact/material plus capability suites then passed 14/14 on gram.
+- Final integrated source `c52b85a` passed the focused correction checks. Parent
+  built a fresh pinned image and started the full suite plus actual isolated Pi
+  profile; native Astra is reviewing that committed source. No native tester was
+  substituted after the native thread limit; the parent runs remote regression.
+- Final review found a mixed Anthropic user block could lose authoritative text
+  when grouped with a tool result. Actual profile acceptance also found the
+  loopback relay discarded the new trace headers even though the worker's fixed
+  profile marker was true. Review/approval/rejection/rollover passed up to trace
+  correlation; this is a real integration failure, not a completed acceptance run.
+- With one active Astra reviewer, zero active implementers and zero active bridge
+  jobs, existing runtime Sol owns these two bounded fixes in
+  `/Users/leebw/workspace/claude/pi-mcp-worktrees/harness-final-fixes`, branch
+  `codex/harness/final-fixes`, base `c52b85aeeffe74384c19dca5a557e56755e63ff0`.
+  Scope: context policy, fixed relay trace forwarding, focused tests and report.
+  Mixed user blocks must remain mandatory; only the existing diagnostic UUID trio
+  may traverse the chat relay, with duplicate/malformed handling still fail-closed
+  and no arbitrary or credential header forwarding. Parent owns integration and
+  fresh-image regression/profile reruns after the committed handoff.
