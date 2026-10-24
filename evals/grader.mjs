@@ -21,7 +21,7 @@ function executionCriterionBase(execution) {
 
 function gradeArtifactCriterion(task, trace) {
   const base = executionCriterionBase(trace.execution);
-  const outcome = base ?? (task.expectedEvidence.changedPaths.every(p => trace.artifacts.changedPaths.includes(p))
+  const outcome = base ?? (trace.artifacts.changedPaths === null ? { outcome: 'unknown', reason: 'evidence_unavailable' } : task.expectedEvidence.changedPaths.every(p => trace.artifacts.changedPaths.includes(p))
     ? { outcome: 'pass', reason: null }
     : { outcome: 'fail', reason: 'missing_evidence' });
   return {
@@ -66,6 +66,7 @@ function gradeConstraintCriteria(task, trace) {
     const description = `File "${path}" reported unchanged (file-preservation evidence only; this does not prove full API semantics for "${constraintId}").`;
     const base = executionCriterionBase(trace.execution);
     if (base) return { id: `constraint:${constraintId}`, kind: 'constraint', description, ...base };
+    if (trace.retainedConstraintIds === null || trace.artifacts.unchangedPaths === null) return { id: `constraint:${constraintId}`, kind: 'constraint', description, outcome: 'unknown', reason: 'evidence_unavailable' };
     const retained = trace.retainedConstraintIds.includes(constraintId) && trace.artifacts.unchangedPaths.includes(path);
     return { id: `constraint:${constraintId}`, kind: 'constraint', description, outcome: retained ? 'pass' : 'fail', reason: retained ? null : 'missing_evidence' };
   });
@@ -118,7 +119,7 @@ export function gradeTask(task, trace) {
   const resumeApplicable = task.expectedEvidence.requiresResume;
   const success = trace.execution.status === 'completed' &&
     criteria.filter(c => c.kind === 'artifact' || c.kind === 'verification' || c.kind === 'review').every(c => c.outcome === 'pass') &&
-    constraintRetention !== 'lost' &&
+    (!task.expectedEvidence.requiredConstraintIds.length || constraintRetention === 'retained') &&
     (!resumeApplicable || resumeCorrectness === 'correct');
   return {
     taskId: task.id,
@@ -142,6 +143,9 @@ function aggregateObserved(values) {
 }
 
 export function gradeSuite({ suite, traces, selectedTaskIds }) {
+  if (!Array.isArray(selectedTaskIds) || selectedTaskIds.length < 1 || selectedTaskIds.length > 64 ||
+    new Set(selectedTaskIds).size !== selectedTaskIds.length || selectedTaskIds.some(id => !suite.tasks.some(task => task.id === id))) throw new Error('Invalid selected task IDs');
+  if (!Array.isArray(traces) || traces.some(trace => !selectedTaskIds.includes(trace.taskId))) throw new Error('Trace outside selection');
   const byTaskId = new Map();
   for (const trace of traces) {
     if (byTaskId.has(trace.taskId)) throw new Error(`gradeSuite: duplicate trace for taskId "${trace.taskId}"`);
@@ -169,8 +173,6 @@ export function gradeSuite({ suite, traces, selectedTaskIds }) {
   const resumeApplicable = selectedTaskIds.filter(id => findTask(suite, id).expectedEvidence.requiresResume);
   const resumeFor = id => perTask.find(item => item.taskId === id).resumeCorrectness;
 
-  const observedPerTask = perTask.filter(item => item.hasTrace);
-
   return {
     graderVersion: GRADER_VERSION,
     selectedTaskIds: [...selectedTaskIds],
@@ -187,10 +189,10 @@ export function gradeSuite({ suite, traces, selectedTaskIds }) {
       unknown: resumeApplicable.filter(id => resumeFor(id) === 'unknown').length,
       applicable: resumeApplicable.length,
     },
-    latencyMs: aggregateObserved(observedPerTask.map(item => item.latencyMs)),
+    latencyMs: aggregateObserved(perTask.map(item => item.latencyMs)),
     usage: {
-      totalTokens: aggregateObserved(observedPerTask.map(item => item.usage.totalTokens)),
-      costUsd: aggregateObserved(observedPerTask.map(item => item.usage.costUsd)),
+      totalTokens: aggregateObserved(perTask.map(item => item.usage.totalTokens)),
+      costUsd: aggregateObserved(perTask.map(item => item.usage.costUsd)),
     },
     perTask,
   };

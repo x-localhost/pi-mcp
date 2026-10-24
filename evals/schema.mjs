@@ -11,6 +11,7 @@
 
 import { SchemaError } from './errors.mjs';
 import { HEX64, GIT_SHA, CONFIG_FINGERPRINT_PATTERN, sha256Hex, stableStringify } from './util.mjs';
+import { normalizeAcceptance, contractDigest } from '../src/acceptance.mjs';
 
 const ID_PATTERN = /^[a-z][a-z0-9-]{2,63}$/;
 const RUN_TOKEN_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,80}$/;
@@ -29,6 +30,7 @@ const MAX_IDS = 16;
 const MAX_RESUME_EVENTS = 64;
 const MAX_BATCH = 64;
 const MAX_STRING = 2000;
+const CRITERION_KINDS = new Set(['artifact', 'verification', 'review', 'resume', 'constraint']);
 
 function fail(message) {
   throw new SchemaError(message);
@@ -86,10 +88,11 @@ export function parseTask(raw) {
     allowKeys(entry, `task.criteria[${index}]`, ['id', 'kind', 'description']);
     return {
       id: requireString(entry.id, `task.criteria[${index}].id`, { max: 64 }),
-      kind: requireString(entry.kind, `task.criteria[${index}].kind`, { max: 32 }),
+      kind: requireEnum(entry.kind, `task.criteria[${index}].kind`, CRITERION_KINDS),
       description: requireString(entry.description, `task.criteria[${index}].description`, { max: 400 }),
     };
   });
+  if (new Set(criteria.map(entry => entry.id)).size !== criteria.length) fail('Duplicate task.criteria id');
   requireObject(raw.expectedEvidence, 'task.expectedEvidence');
   allowKeys(raw.expectedEvidence, 'task.expectedEvidence', [
     'changedPaths', 'requiredVerifierIds', 'requiresReview', 'requiresResume',
@@ -115,6 +118,16 @@ export function parseTask(raw) {
   if (new Set(evidenceIds).size !== evidenceIds.length) fail('Duplicate constraintEvidence entries for the same constraintId');
   for (const constraintId of requiredConstraintIds) if (!evidenceIds.includes(constraintId)) fail(`Missing constraintEvidence for required constraint "${constraintId}"`);
   for (const constraintId of evidenceIds) if (!requiredConstraintIds.includes(constraintId)) fail(`constraintEvidence references constraint "${constraintId}" that is not required`);
+  const expectedCriteria = new Map([['artifact', 'artifact']]);
+  if (requiredVerifierIds.length) expectedCriteria.set('verification', 'verification');
+  if (requiresReview) expectedCriteria.set('review', 'review');
+  if (requiresResume) expectedCriteria.set('resume', 'resume');
+  for (const constraintId of requiredConstraintIds) expectedCriteria.set(`constraint:${constraintId}`, 'constraint');
+  if (criteria.some(entry => expectedCriteria.get(entry.id) !== entry.kind) || criteria.length > expectedCriteria.size) fail('Unsupported task criterion');
+  try {
+    normalizeAcceptance({ version: 1, required_verification_ids: requiredVerifierIds, required_artifact_paths: changedPaths, require_review: requiresReview });
+    for (const item of constraintEvidence) normalizeAcceptance({ version: 1, required_artifact_paths: [item.path] });
+  } catch { fail('Invalid task evidence path or runtime acceptance contract'); }
   return { id, scenario, prompt, criteria, expectedEvidence: { changedPaths, requiredVerifierIds, requiresReview, requiresResume, requiredConstraintIds, constraintEvidence } };
 }
 
@@ -123,12 +136,8 @@ export function parseTask(raw) {
 // self-reported value; a trace's claimed contractDigest is compared against
 // this, independently recomputed, value.
 export function taskContractDigest(task) {
-  return sha256Hex({
-    changedPaths: [...task.expectedEvidence.changedPaths].sort(),
-    requiredVerifierIds: [...task.expectedEvidence.requiredVerifierIds].sort(),
-    requiresReview: task.expectedEvidence.requiresReview,
-    requiredConstraintIds: [...task.expectedEvidence.requiredConstraintIds].sort(),
-  });
+  return contractDigest({ version: 1, required_verification_ids: task.expectedEvidence.requiredVerifierIds,
+    required_artifact_paths: task.expectedEvidence.changedPaths, require_review: task.expectedEvidence.requiresReview });
 }
 
 export function taskContentDigest(task) {
@@ -150,10 +159,10 @@ function parseExecution(raw) {
 function parseArtifacts(raw) {
   requireObject(raw, 'trace.artifacts');
   allowKeys(raw, 'trace.artifacts', ['changedPaths', 'unchangedPaths']);
-  return {
-    changedPaths: requireUniqueStringArray(raw.changedPaths, 'trace.artifacts.changedPaths', { max: MAX_PATHS }),
-    unchangedPaths: requireUniqueStringArray(raw.unchangedPaths, 'trace.artifacts.unchangedPaths', { max: MAX_PATHS }),
-  };
+  const changedPaths = raw.changedPaths === null ? null : requireUniqueStringArray(raw.changedPaths, 'trace.artifacts.changedPaths', { max: MAX_PATHS });
+  const unchangedPaths = raw.unchangedPaths === null ? null : requireUniqueStringArray(raw.unchangedPaths, 'trace.artifacts.unchangedPaths', { max: MAX_PATHS });
+  if (changedPaths && unchangedPaths && changedPaths.some(item => unchangedPaths.includes(item))) fail('Contradictory changed/unchanged path evidence');
+  return { changedPaths, unchangedPaths };
 }
 
 function parseVerification(raw) {
@@ -173,6 +182,7 @@ function parseReview(raw) {
   if (raw === null) return null;
   requireObject(raw, 'trace.review');
   allowKeys(raw, 'trace.review', ['jobId', 'reviewJobId', 'codeDigest', 'contractDigest', 'verdict']);
+  if (raw.jobId === raw.reviewJobId) fail('Independent review requires a different reviewJobId');
   return {
     jobId: requireString(raw.jobId, 'trace.review.jobId', { pattern: RUN_TOKEN_PATTERN, max: 80 }),
     reviewJobId: requireString(raw.reviewJobId, 'trace.review.reviewJobId', { pattern: RUN_TOKEN_PATTERN, max: 80 }),
@@ -242,7 +252,8 @@ export function parseTrace(raw) {
   const artifacts = parseArtifacts(raw.artifacts);
   const verification = parseVerification(raw.verification === undefined ? null : raw.verification);
   const review = parseReview(raw.review === undefined ? null : raw.review);
-  const retainedConstraintIds = requireUniqueStringArray(raw.retainedConstraintIds, 'trace.retainedConstraintIds', { max: MAX_IDS, pattern: ID_PATTERN });
+  const retainedConstraintIds = raw.retainedConstraintIds === null ? null :
+    requireUniqueStringArray(raw.retainedConstraintIds, 'trace.retainedConstraintIds', { max: MAX_IDS, pattern: ID_PATTERN });
   const resumeEvents = parseResumeEvents(raw.resumeEvents);
   const eventsTruncated = requireBoolean(raw.eventsTruncated, 'trace.eventsTruncated');
   let timing = null;

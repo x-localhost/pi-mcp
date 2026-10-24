@@ -62,6 +62,7 @@ import { buildReport, writeReport } from '../evals/report.mjs';
 import { compareReports } from '../evals/compare.mjs';
 import { submitLiveRun, pollLiveRun } from '../evals/live-adapter.mjs';
 import { Manager } from '../src/manager.mjs';
+import { sha256Hex, stableStringify } from '../evals/util.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(here);
@@ -347,7 +348,7 @@ test('gradeSuite output is deterministic for identical inputs (no ambient time/r
 function makeReport(task, traces, overrides = {}) {
   const result = gradeSuite({ suite: { tasks: [task] }, traces, selectedTaskIds: [task.id] });
   return buildReport({
-    suite: { tasks: [task], digest: 'suite-digest-fixture', version: 'v1' },
+    suite: { tasks: [task], digest: sha256Hex(stableStringify([task])), version: 'v1' },
     graderVersion: GRADER_VERSION,
     selectedTaskIds: [task.id],
     harnessCommit: HARNESS_COMMIT,
@@ -380,7 +381,7 @@ test('buildReport rejects a report whose declared provenance does not match an i
   mismatched.harnessCommit = 'f'.repeat(40); // forged after parsing: pretend it came from a different harness
   const result = gradeSuite({ suite: { tasks: [task] }, traces: [mismatched], selectedTaskIds: [task.id] });
   assert.throws(() => buildReport({
-    suite: { tasks: [task], digest: 'd', version: 'v1' }, graderVersion: GRADER_VERSION, selectedTaskIds: [task.id],
+    suite: { tasks: [task], digest: sha256Hex(stableStringify([task])), version: 'v1' }, graderVersion: GRADER_VERSION, selectedTaskIds: [task.id],
     harnessCommit: HARNESS_COMMIT, taskBaseCommit: TASK_BASE_COMMIT, configFingerprint: CONFIG_FINGERPRINT,
     origin: 'synthetic', traces: [mismatched], result,
   }), ProvenanceError);
@@ -398,9 +399,9 @@ test('writeReport writes owner-private, non-overwriting output to an explicit de
 test('compareReports refuses incompatible suite/grader/config/origin provenance, but allows an intentionally different taskBaseCommit', () => {
   const task = baseTask();
   const baseline = makeReport(task, [baseTrace(task)]);
-  const sameProvenanceDifferentSource = makeReport(task, [baseTrace(task)], { taskBaseCommit: 'd'.repeat(40) });
+  const sameProvenanceDifferentSource = makeReport(task, [baseTrace(task, { taskBaseCommit: 'd'.repeat(40) })], { taskBaseCommit: 'd'.repeat(40) });
   assert.doesNotThrow(() => compareReports(baseline, sameProvenanceDifferentSource));
-  const incompatibleConfig = makeReport(task, [baseTrace(task)], { configFingerprint: `sha256:${'9'.repeat(64)}` });
+  const incompatibleConfig = makeReport(task, [baseTrace(task, { configFingerprint: `sha256:${'9'.repeat(64)}` })], { configFingerprint: `sha256:${'9'.repeat(64)}` });
   assert.throws(() => compareReports(baseline, incompatibleConfig), ProvenanceError);
 });
 
@@ -409,12 +410,13 @@ test('compareReports refuses mismatched task selection by default, names the gap
   const taskB = baseTask({ id: 'task-b' });
   const baselineResult = gradeSuite({ suite: { tasks: [taskA, taskB] }, traces: [baseTrace(taskA), baseTrace(taskB)], selectedTaskIds: ['task-a', 'task-b'] });
   const candidateResult = gradeSuite({ suite: { tasks: [taskA] }, traces: [baseTrace(taskA)], selectedTaskIds: ['task-a'] });
-  const baseline = buildReport({ suite: { tasks: [taskA, taskB], digest: 'd', version: 'v1' }, graderVersion: GRADER_VERSION, selectedTaskIds: ['task-a', 'task-b'],
+  const comparedSuite = { tasks: [taskA, taskB], digest: sha256Hex(stableStringify([taskA, taskB])), version: 'v1' };
+  const baseline = buildReport({ suite: comparedSuite, graderVersion: GRADER_VERSION, selectedTaskIds: ['task-a', 'task-b'],
     harnessCommit: HARNESS_COMMIT, taskBaseCommit: TASK_BASE_COMMIT, configFingerprint: CONFIG_FINGERPRINT, origin: 'synthetic', traces: [baseTrace(taskA), baseTrace(taskB)], result: baselineResult });
-  const candidate = buildReport({ suite: { tasks: [taskA], digest: 'd', version: 'v1' }, graderVersion: GRADER_VERSION, selectedTaskIds: ['task-a'],
+  const candidate = buildReport({ suite: comparedSuite, graderVersion: GRADER_VERSION, selectedTaskIds: ['task-a'],
     harnessCommit: HARNESS_COMMIT, taskBaseCommit: TASK_BASE_COMMIT, configFingerprint: CONFIG_FINGERPRINT, origin: 'synthetic', traces: [baseTrace(taskA)], result: candidateResult });
   assert.throws(() => compareReports(baseline, candidate), /task-b/);
-  const comparison = compareReports(baseline, candidate, { allowSelectionMismatch: true });
+  const comparison = compareReports(baseline, candidate, { allowSelectionMismatch: true, allowObservedMismatch: true });
   assert.deepEqual(comparison.taskSelection.onlyBaseline, ['task-b']);
   assert.deepEqual(comparison.taskSelection.matched, ['task-a']);
 });
@@ -480,7 +482,7 @@ test('CLI compare reports a regression between the baseline and regressed synthe
 });
 
 test('CLI live refuses to proceed (and never needs config/credentials) without --live and the explicit --ack token', () => {
-  const result = runCli(['live', '--run-id', 'r1', '--select', 'fix-null-check', '--repository', '/nonexistent-repo', '--base-commit', 'a'.repeat(40), '--config-fingerprint', `sha256:${'3'.repeat(64)}`, '--state-dir', '/tmp/does-not-matter'], { env: {} });
+  const result = runCli(['live', '--run-id', 'r1', '--select', 'fix-null-check', '--repository', '/nonexistent-repo', '--base-commit', 'a'.repeat(40), '--state-dir', '/tmp/does-not-matter'], { env: {} });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /--live/);
 });
@@ -504,17 +506,18 @@ async function makeFakeManagerFixture() {
     stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], maxConcurrent: 4,
     defaultTimeoutSeconds: 30, maxTimeoutSeconds: 60, defaultMaxTurns: 2,
     piPath: '/bin/true', allowedCommands: [], provider: 'mock', model: 'mock-model',
+    verification: { commands: [{ id: 'lint', argv: ['/usr/bin/true'], timeoutSeconds: 3, maxOutputBytes: 1000, readOnly: true }], maxSelected: 1 },
   }, {}, { spawnWorker: false }).init();
   const stateDir = path.join(tmp, 'eval-run-state');
   return { manager, repository, baseCommit, stateDir };
 }
 
-const LIVE_SUITE_DIGEST = 'suite-digest-fixture';
+const LIVE_SUITE_DIGEST = sha256Hex('suite-digest-fixture');
 
 test('submitLiveRun refuses to contact the Manager at all without explicit live acknowledgement', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const base = { manager, stateDir, runId: 'run-ack', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT };
+  const base = { manager, stateDir, runId: 'run-ack', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit };
   await assert.rejects(submitLiveRun({ ...base, acknowledgeLive: false }), /acknowledge|live/i);
   await assert.rejects(submitLiveRun(base), /acknowledge|live/i);
   const jobs = await fs.readdir(manager.jobsDir).catch(() => []);
@@ -526,7 +529,7 @@ test('submitLiveRun refuses to contact the Manager at all without explicit live 
 test('submitLiveRun is idempotent across a simulated restart (no in-memory cache, only the persisted stateDir)', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const base = { manager, stateDir, runId: 'run-retry', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true };
+  const base = { manager, stateDir, runId: 'run-retry', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true };
   const first = await submitLiveRun(base);
   const restarted = await submitLiveRun(base); // a fresh call with no shared JS state, simulating an adapter restart
   assert.equal(restarted.jobId, first.jobId);
@@ -537,7 +540,7 @@ test('submitLiveRun is idempotent across a simulated restart (no in-memory cache
 test('submitLiveRun reconciles a lost submit response using the stable request id, without duplicating the job', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const base = { manager, stateDir, runId: 'run-lost', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true };
+  const base = { manager, stateDir, runId: 'run-lost', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true };
   const first = await submitLiveRun(base);
   // Simulate a crash after the Manager created the job but before the
   // adapter's own record of its id was durably updated.
@@ -555,11 +558,11 @@ test('submitLiveRun reconciles a lost submit response using the stable request i
 test('submitLiveRun rejects a changed configFingerprint or task selection under the same runId, before contacting the Manager', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const base = { manager, stateDir, runId: 'run-identity', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true };
+  const base = { manager, stateDir, runId: 'run-identity', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true };
   await submitLiveRun(base);
   await assert.rejects(submitLiveRun({ ...base, configFingerprint: `sha256:${'9'.repeat(64)}` }), ProvenanceError);
   const otherTask = baseTask({ id: 'other-task' });
-  await assert.rejects(submitLiveRun({ ...base, selectedTaskIds: [task.id, otherTask.id] }), ProvenanceError);
+  await assert.rejects(submitLiveRun({ ...base, selectedTaskIds: [task.id, otherTask.id], tasks: [task, otherTask] }), ProvenanceError);
   const jobs = await fs.readdir(manager.jobsDir);
   assert.equal(jobs.length, 1, 'rejected identity changes must not create additional jobs');
 });
@@ -567,7 +570,7 @@ test('submitLiveRun rejects a changed configFingerprint or task selection under 
 test('submitLiveRun rejects changed task content under the same run/task identity, before contacting the Manager', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const base = { manager, stateDir, runId: 'run-content', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true };
+  const base = { manager, stateDir, runId: 'run-content', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true };
   await submitLiveRun(base);
   const changedTask = baseTask({ prompt: 'A completely different instruction.' });
   await assert.rejects(submitLiveRun({ ...base, task: changedTask }), ProvenanceError);
@@ -578,7 +581,7 @@ test('submitLiveRun rejects changed task content under the same run/task identit
 test('submitLiveRun never performs automatic approval or review attestation, and exports no approval-capable function', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const submitted = await submitLiveRun({ manager, stateDir, runId: 'run-approve', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true });
+  const submitted = await submitLiveRun({ manager, stateDir, runId: 'run-approve', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true });
   const job = await manager.read(submitted.jobId);
   assert.ok(!job.reviewAttestations || job.reviewAttestations.length === 0);
   const liveAdapterModule = await import('../evals/live-adapter.mjs');
@@ -587,13 +590,13 @@ test('submitLiveRun never performs automatic approval or review attestation, and
   }
   // Only the explicitly constructed, allowlisted evidence is returned -- not
   // the full Manager job record (which includes prompt, worktree, etc.).
-  assert.deepEqual(new Set(Object.keys(submitted)), new Set(['runId', 'taskId', 'jobId', 'requestId', 'status', 'origin']));
+  assert.deepEqual(new Set(Object.keys(submitted)), new Set(['runId', 'taskId', 'jobId', 'requestId', 'status', 'origin', 'configFingerprint']));
 });
 
 test('pollLiveRun returns truthfully bounded status without fabricating completion, and preserves an unresolved error as null', async () => {
   const { manager, repository, baseCommit, stateDir } = await makeFakeManagerFixture();
   const task = baseTask();
-  const submitted = await submitLiveRun({ manager, stateDir, runId: 'run-poll', suiteDigest: LIVE_SUITE_DIGEST, selectedTaskIds: [task.id], task, repository, baseCommit, configFingerprint: CONFIG_FINGERPRINT, acknowledgeLive: true });
+  const submitted = await submitLiveRun({ manager, stateDir, runId: 'run-poll', suiteDigest: LIVE_SUITE_DIGEST, harnessCommit: HARNESS_COMMIT, selectedTaskIds: [task.id], task, repository, baseCommit, acknowledgeLive: true });
   const started = Date.now();
   const polled = await pollLiveRun({ manager, jobId: submitted.jobId, timeoutMs: 1000 });
   const elapsed = Date.now() - started;

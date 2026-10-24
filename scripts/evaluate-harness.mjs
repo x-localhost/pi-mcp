@@ -1,138 +1,156 @@
 #!/usr/bin/env node
-// Offline-first harness evaluation CLI. See docs/harness-evals.md for the
-// full command reference.
-//
-// `replay` and `compare` are fully offline: this file's only static imports
-// are the pure evals/* offline modules below. Manager, pi-mcp configuration
-// and any live adapter code are imported dynamically, and only inside the
-// `live` subcommand, and only after the explicit --live/--ack guard passes.
-
+// replay/compare remain offline: Manager and config are imported only by live.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { constants as C } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-
 import { SchemaError } from '../evals/errors.mjs';
 import { parseTraceBatch } from '../evals/schema.mjs';
 import { loadSuite } from '../evals/suite.mjs';
-import { gradeSuite } from '../evals/grader.mjs';
+import { GRADER_VERSION } from '../evals/grader.mjs';
 import { buildReport, writeReport } from '../evals/report.mjs';
 import { compareReports } from '../evals/compare.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.dirname(here);
-const MAX_INPUT_BYTES = 5 * 1024 * 1024;
-const LIVE_ACK_TOKEN = 'I-UNDERSTAND-THIS-SUBMITS-TO-THE-CONFIGURED-PI-MCP-MANAGER';
-
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const exec = promisify(execFile);
+const MAX_INPUT = 5 * 1024 * 1024;
+const ACK = 'I-UNDERSTAND-THIS-SUBMITS-TO-THE-CONFIGURED-PI-MCP-MANAGER';
+const legal = {
+  replay: new Set(['fixture','traces','origin','select','harness-commit','task-base-commit','config-fingerprint','out']),
+  compare: new Set(['baseline','candidate','allow-selection-mismatch','allow-observed-mismatch','out']),
+  live: new Set(['live','ack','run-id','select','repository','base-commit','state-dir','config','provider','model','poll-timeout-ms','run-timeout-ms','out']),
+};
+const booleans = new Set(['live','allow-selection-mismatch','allow-observed-mismatch']);
 function parseArgs(argv) {
-  const [subcommand, ...rest] = argv;
+  const [subcommand,...rest] = argv;
+  if (!legal[subcommand]) throw new Error('Expected replay, compare or live');
   const flags = {};
   for (let i = 0; i < rest.length; i++) {
-    const token = rest[i];
-    if (!token.startsWith('--')) continue;
-    const name = token.slice(2);
-    const next = rest[i + 1];
-    if (next === undefined || next.startsWith('--')) flags[name] = true;
-    else { flags[name] = next; i++; }
+    const token = rest[i], name = token?.slice(2);
+    if (!token?.startsWith('--') || !legal[subcommand].has(name)) throw new Error('Unknown or positional argument');
+    if (Object.hasOwn(flags,name)) throw new Error('Duplicate flag: --' + name);
+    if (booleans.has(name)) { flags[name] = true; continue; }
+    const value = rest[++i];
+    if (value === undefined || value.startsWith('--')) throw new Error('Missing value for --' + name);
+    flags[name] = value;
   }
   return { subcommand, flags };
 }
-
-async function readBoundedJson(file) {
-  const stat = await fs.stat(file);
-  if (!stat.isFile() || stat.size > MAX_INPUT_BYTES) throw new SchemaError(`Input file too large or not a regular file: ${file}`);
-  return JSON.parse(await fs.readFile(file, 'utf8'));
+async function readJson(file) {
+  if (typeof file !== 'string') throw new Error('Input file required');
+  const h = await fs.open(path.resolve(file), C.O_RDONLY | C.O_NOFOLLOW).catch(() => { throw new SchemaError('Unable to read input'); });
+  try {
+    const before = await h.stat();
+    if (!before.isFile() || before.nlink !== 1 || before.size < 2 || before.size > MAX_INPUT) throw new SchemaError('Unsafe or oversized input');
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await h.read(bytes, offset, bytes.length-offset, offset);
+      if (!bytesRead) throw new SchemaError('Input changed during read');
+      offset += bytesRead;
+    }
+    const after = await h.stat();
+    if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new SchemaError('Input changed during read');
+    return JSON.parse(bytes.toString('utf8'));
+  } finally { await h.close(); }
 }
-
-async function loadTraces(flags) {
+function selection(raw, suite) {
+  if (typeof raw !== 'string') throw new Error('--select required');
+  const ids = raw.split(',');
+  if (!ids.length || ids.length > 16 || ids.some(id => !id || id !== id.trim()) ||
+    new Set(ids).size !== ids.length || ids.some(id => !suite.tasks.some(task => task.id === id))) throw new Error('Invalid selected task IDs');
+  return ids;
+}
+function boundedMs(raw, label, defaultValue, max) {
+  if (raw === undefined) return defaultValue;
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error('Invalid ' + label);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > max) throw new Error('Invalid ' + label);
+  return value;
+}
+async function tracesFor(flags) {
+  if (flags.fixture && flags.traces) throw new Error('Choose fixture or traces');
   if (flags.fixture) {
-    if (!['baseline', 'regressed'].includes(flags.fixture)) throw new Error('--fixture must be "baseline" or "regressed"');
-    const module = await import(pathToFileURL(path.join(repoRoot, 'evals', 'fixtures', `synthetic-${flags.fixture}.mjs`)));
+    if (!['baseline','regressed','incomplete'].includes(flags.fixture)) throw new Error('Unknown fixture');
+    const module = await import(pathToFileURL(path.join(root,'evals','fixtures','synthetic-'+flags.fixture+'.mjs')));
     return module.traces;
   }
-  if (flags.traces) return await readBoundedJson(path.isAbsolute(flags.traces) ? flags.traces : path.resolve(process.cwd(), flags.traces));
-  throw new Error('replay requires --fixture <baseline|regressed> or --traces <path>');
+  const value = await readJson(flags.traces);
+  return Array.isArray(value) ? value : value?.version === 1 && Array.isArray(value.traces) ? value.traces : value;
 }
-
-async function emit(flags, report) {
+async function emit(flags, value) {
   if (flags.out) {
-    const destination = path.isAbsolute(flags.out) ? flags.out : path.resolve(process.cwd(), flags.out);
-    await writeReport(destination, report);
-    process.stdout.write(`Wrote report to ${destination}\n`);
-  } else {
-    process.stdout.write(JSON.stringify(report, null, 2) + '\n');
-  }
+    const destination = path.resolve(flags.out);
+    await writeReport(destination,value);
+    process.stdout.write('Wrote output to ' + destination + '\n');
+  } else process.stdout.write(JSON.stringify(value,null,2) + '\n');
 }
-
-async function runReplay(flags) {
-  const required = ['harness-commit', 'task-base-commit', 'config-fingerprint'];
-  for (const name of required) if (typeof flags[name] !== 'string') throw new Error(`replay requires --${name}`);
-  const origin = flags.fixture ? 'synthetic' : (flags.origin || 'synthetic');
+async function replay(flags) {
+  for (const name of ['harness-commit','task-base-commit','config-fingerprint']) if (typeof flags[name] !== 'string') throw new Error('Missing --'+name);
   const suite = await loadSuite();
-  const rawTraces = await loadTraces(flags);
-  const traces = parseTraceBatch(rawTraces);
-  const selectedTaskIds = flags.select ? String(flags.select).split(',').map(id => id.trim()).filter(Boolean) : suite.tasks.map(task => task.id);
-  const result = gradeSuite({ suite, traces, selectedTaskIds });
-  const report = buildReport({
-    suite, graderVersion: result.graderVersion, selectedTaskIds,
+  const traces = parseTraceBatch(await tracesFor(flags));
+  const origin = flags.fixture ? 'synthetic' : flags.origin ?? 'synthetic';
+  const selectedTaskIds = flags.select ? selection(flags.select,suite) : suite.tasks.map(task => task.id);
+  await emit(flags, buildReport({ suite, graderVersion: GRADER_VERSION, selectedTaskIds,
     harnessCommit: flags['harness-commit'], taskBaseCommit: flags['task-base-commit'],
-    configFingerprint: flags['config-fingerprint'], origin, traces, result,
-  });
-  await emit(flags, report);
+    configFingerprint: flags['config-fingerprint'], origin, traces }));
 }
-
-async function runCompare(flags) {
-  if (typeof flags.baseline !== 'string' || typeof flags.candidate !== 'string') throw new Error('compare requires --baseline <path> and --candidate <path>');
-  const baseline = await readBoundedJson(path.resolve(process.cwd(), flags.baseline));
-  const candidate = await readBoundedJson(path.resolve(process.cwd(), flags.candidate));
-  const comparison = compareReports(baseline, candidate, { allowSelectionMismatch: Boolean(flags['allow-selection-mismatch']) });
-  await emit(flags, comparison);
+async function compare(flags) {
+  if (!flags.baseline || !flags.candidate) throw new Error('compare requires baseline and candidate');
+  await emit(flags, compareReports(await readJson(flags.baseline), await readJson(flags.candidate),
+    { allowSelectionMismatch: !!flags['allow-selection-mismatch'], allowObservedMismatch: !!flags['allow-observed-mismatch'] }));
 }
-
-async function runLive(flags) {
-  // Guard first: no config, credentials, Manager or live-adapter module is
-  // touched until both conditions below hold.
-  if (!flags.live) throw new Error('live requires --live to explicitly opt in to contacting the configured Pi MCP Manager');
-  if (flags.ack !== LIVE_ACK_TOKEN) throw new Error(`live requires --ack ${LIVE_ACK_TOKEN}`);
-  for (const name of ['run-id', 'select', 'repository', 'base-commit', 'config-fingerprint', 'state-dir']) {
-    if (typeof flags[name] !== 'string') throw new Error(`live requires --${name}`);
-  }
-
-  const { submitLiveRun, pollLiveRun } = await import('../evals/live-adapter.mjs');
+async function live(flags) {
+  if (!flags.live) throw new Error('live requires --live');
+  if (flags.ack !== ACK) throw new Error('live requires --ack ' + ACK);
+  for (const key of ['run-id','select','repository','base-commit','state-dir']) if (typeof flags[key] !== 'string') throw new Error('live requires --' + key);
+  const suite = await loadSuite();
+  const selectedTaskIds = selection(flags.select,suite);
+  const pollMs = boundedMs(flags['poll-timeout-ms'],'poll-timeout-ms',30000,30000);
+  const runMs = boundedMs(flags['run-timeout-ms'],'run-timeout-ms',120000,120000);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,80}$/.test(flags['run-id'])) throw new Error('Invalid run-id');
+  if (flags.provider && !/^[a-zA-Z0-9_-]{1,80}$/.test(flags.provider) ||
+      flags.model && !/^[a-zA-Z0-9_.:/-]{1,120}$/.test(flags.model)) throw new Error('Invalid provider/model ID');
+  const repository = path.resolve(flags.repository), stateDir = path.resolve(flags['state-dir']);
+  const { stdout } = await exec('git',['-C',root,'rev-parse','HEAD'],{timeout:5000,maxBuffer:1024});
+  const harnessCommit = stdout.trim();
+  // No Manager/config side effects occur before selection, time, and SHA validation.
+  if (!/^[0-9a-f]{40}$/.test(harnessCommit) || !/^[0-9a-f]{40}$/.test(flags['base-commit'])) throw new Error('Committed SHAs required');
+  const base = await exec('git',['-C',repository,'rev-parse','--verify',flags['base-commit']+'^{commit}'],{timeout:5000,maxBuffer:1024})
+    .catch(() => { throw new Error('Task base commit unavailable'); });
+  if (base.stdout.trim() !== flags['base-commit']) throw new Error('Task base commit unavailable');
   const { loadConfig, buildChildEnv } = await import('../src/config.mjs');
   const { Manager } = await import('../src/manager.mjs');
-
-  const config = await loadConfig(flags.config || process.env.PI_MCP_CONFIG);
-  const childEnv = buildChildEnv(config);
-  const manager = await new Manager(config, childEnv).init();
-
-  const suite = await loadSuite();
-  const selectedTaskIds = String(flags.select).split(',').map(id => id.trim()).filter(Boolean);
-  const results = [];
-  for (const taskId of selectedTaskIds) {
-    const task = suite.tasks.find(item => item.id === taskId);
-    if (!task) throw new Error(`Unknown task id in --select: ${taskId}`);
-    const submitted = await submitLiveRun({
-      manager, stateDir: path.resolve(process.cwd(), flags['state-dir']), runId: flags['run-id'],
-      suiteDigest: suite.digest, selectedTaskIds, task,
-      repository: path.resolve(process.cwd(), flags.repository), baseCommit: flags['base-commit'],
-      configFingerprint: flags['config-fingerprint'], provider: flags.provider, model: flags.model,
-      acknowledgeLive: true,
-    });
-    const polled = await pollLiveRun({ manager, jobId: submitted.jobId, timeoutMs: Number(flags['poll-timeout-ms']) || 30000 });
-    results.push({ ...submitted, status: polled.status, finishedAt: polled.finishedAt, error: polled.error });
+  const { submitLiveRun, pollLiveRun } = await import('../evals/live-adapter.mjs');
+  let config, manager;
+  try {
+    config = await loadConfig(flags.config || process.env.PI_MCP_CONFIG);
+    manager = await new Manager(config, buildChildEnv(config)).init();
+  } catch { throw new Error('Live Manager initialization failed'); }
+  const selected = selectedTaskIds.map(id => suite.tasks.find(task => task.id === id));
+  const deadline = Date.now() + runMs, traces = [];
+  for (const task of selected) {
+    if (Date.now() >= deadline) break;
+    const submission = await submitLiveRun({ manager,stateDir,runId:flags['run-id'],suiteDigest:suite.digest,
+      selectedTaskIds,tasks:selected,task,repository,baseCommit:flags['base-commit'],
+      harnessCommit,config,provider:flags.provider,model:flags.model,acknowledgeLive:true }).catch(() => { throw new Error('Live submission failed'); });
+    const polled = await pollLiveRun({ manager,jobId:submission.jobId,timeoutMs:Math.min(pollMs,Math.max(0,deadline-Date.now())),
+      task,submission,runId:flags['run-id'],harnessCommit,taskBaseCommit:flags['base-commit'] }).catch(() => { throw new Error('Live evidence collection failed'); });
+    traces.push(polled.trace);
   }
-  await emit(flags, { origin: 'live', runId: flags['run-id'], results });
+  const report = buildReport({ suite,graderVersion:GRADER_VERSION,selectedTaskIds,harnessCommit,
+    taskBaseCommit:flags['base-commit'],configFingerprint:traces[0]?.configFingerprint ??
+      (await import('../evals/live-adapter.mjs')).effectiveConfigFingerprint(config,flags.provider,flags.model),
+    origin:'live',traces });
+  await emit(flags,{ version:1,origin:'live',runId:flags['run-id'],traces,report });
 }
-
 async function main() {
   const { subcommand, flags } = parseArgs(process.argv.slice(2));
-  if (subcommand === 'replay') return runReplay(flags);
-  if (subcommand === 'compare') return runCompare(flags);
-  if (subcommand === 'live') return runLive(flags);
-  throw new Error('Usage: evaluate-harness.mjs <replay|compare|live> [--flags]');
+  return ({ replay,compare,live })[subcommand](flags);
 }
-
 main().catch(error => {
-  process.stderr.write(`${error.name || 'Error'}: ${error.message}\n`);
+  process.stderr.write((error.name || 'Error') + ': ' + error.message + '\n');
   process.exitCode = error.name === 'SchemaError' ? 2 : error.name === 'ProvenanceError' ? 3 : 1;
 });
