@@ -158,3 +158,16 @@ independent final review; no recursive delegation. Shared image is read-only
 `pi-harness-evaluation:20261024`; corrective remote root is
 `/tmp/pi-harness-evaluation-corrections-20261024`, with task-specific container
 names, no ports/providers. Parent will not run a competing test on that root.
+
+## Committed correction checkpoint
+
+Sol's terminal handoff passed 55/55 focused tests on gram, including the real
+configured fake-Pi CLI bundle/replay path. Parent reviewed and committed the unit
+as `edb4694`, then integrated it as `8c2f643de1958d8afac30ea70e9cd75ad7f1d56f`.
+Production src/, internal-agent/ and package/lock files remain identical to main.
+Before final review assignment, native Sol and Astra are completed; refreshed
+Claude health reports activeJobs=0. Reuse `/root/harness_design` for read-only
+independent review of this committed integration checkpoint. Parent owns the
+isolated final replay/full regression under
+`/tmp/pi-harness-evaluation-final-20261024`; the shared image remains read-only.
+No blocker may be carried into the clean-main merge.
