@@ -16,7 +16,7 @@ const UPSTREAM_TIMEOUT_MS = 120_000;
 const IDLE_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONFIG_KEYS = new Set(['upstreamUrl', 'upstreamAddress', 'model', 'caFile', 'headers', 'limits', 'mcpServers']);
-const RESERVED_HEADERS = /^(?:host|content-length|content-type|connection|transfer-encoding|upgrade|proxy-.*|x-forwarded-.*|forwarded|via|te|trailer|keep-alive|accept-encoding|accept|expect|http2-settings|mcp-.*)$/i;
+const RESERVED_HEADERS = /^(?:host|content-length|content-type|connection|transfer-encoding|upgrade|proxy-.*|x-forwarded-.*|x-pi-(?:job|request|attempt)-id|forwarded|via|te|trailer|keep-alive|accept-encoding|accept|expect|http2-settings|mcp-.*)$/i;
 const UNSAFE_ENV_REF = /^(?:NODE_|LD_|DYLD_|GIT_CONFIG(?:_|$)|NPM_|PI_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$|HOME$|PATH$|SHELL$|BASH_ENV$|ENV$|SSH_AUTH_SOCK$|OPENSSL_CONF$|SSL_CERT_FILE$|SSL_CERT_DIR$)/i;
 const HEADER_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const MODEL_ID = /^[^\x00-\x1f\x7f]{1,120}$/;
@@ -25,6 +25,19 @@ const invalidChat = () => new Error('Invalid chat request');
 const invalidMcp = () => new Error('Invalid MCP request');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const exact = (value, keys) => object(value) && Object.keys(value).every(key => keys.includes(key));
+const TRACE_NAMES = ['x-pi-job-id', 'x-pi-request-id', 'x-pi-attempt-id'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function readTraceHeaders(req) {
+  const counts = Object.fromEntries(TRACE_NAMES.map(name => [name, 0]));
+  for (let i = 0; i < (req.rawHeaders?.length ?? 0); i += 2) {
+    const name = req.rawHeaders[i].toLowerCase();
+    if (Object.hasOwn(counts, name)) counts[name]++;
+  }
+  const present = TRACE_NAMES.filter(name => req.headers[name] !== undefined);
+  if (!present.length) return null;
+  if (present.length !== TRACE_NAMES.length || TRACE_NAMES.some(name => counts[name] !== 1 || typeof req.headers[name] !== 'string' || !UUID.test(req.headers[name]))) throw invalidChat();
+  return { jobId: req.headers[TRACE_NAMES[0]], requestId: req.headers[TRACE_NAMES[1]], attemptId: req.headers[TRACE_NAMES[2]] };
+}
 
 function privateAddress(value) {
   if (typeof value !== 'string') return false;
@@ -414,13 +427,18 @@ export async function startGateway({ config, socketPath, requestImpl = https.req
     const requestId = randomUUID();
     const start = Date.now();
     res.setHeader('X-Request-Id', requestId);
+    let trace = null;
+    if (!mcpServer) {
+      try { trace = readTraceHeaders(req); }
+      catch { respond(res, 400, 'Invalid chat request\n'); return; }
+    }
     let recorded = false;
     const record = () => {
       if (recorded) return;
       recorded = true;
       const completed = res.writableFinished;
       const category = !completed && res.__gatewayCategory === 'ok' ? 'connect' : res.__gatewayCategory ?? 'protocol';
-      audit.push({ requestId, category, status: res.statusCode, completed, aborted: !completed, elapsedMs: Math.min(120_000, Date.now() - start) });
+      audit.push({ requestId, ...(trace ? { jobId: trace.jobId, providerRequestId: trace.requestId, attemptId: trace.attemptId } : {}), category, status: res.statusCode, completed, aborted: !completed, elapsedMs: Math.min(120_000, Date.now() - start) });
       if (audit.length > 256) audit.shift();
       const tmp = `${auditPath}.${randomUUID()}`;
       try { fs.writeFileSync(tmp, audit.map(entry => JSON.stringify(entry)).join('\n') + '\n', { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, auditPath); }

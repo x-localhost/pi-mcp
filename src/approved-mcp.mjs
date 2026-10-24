@@ -14,6 +14,8 @@ const MAX_HTTP_BYTES = 64 * 1024;
 const MAX_TOOLS = 16;
 const MAX_SERVERS = 4;
 const MCP_VERSION = '2025-11-25';
+export const POLICY_READY_TIMEOUT_MS = 30_000;
+const MCP_STARTUP_BUDGET_MS = 25_000;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const exact = (value, keys) => plain(value) && Object.keys(value).every(key => keys.includes(key));
 const fail = () => { throw new Error('Invalid approved MCP configuration'); };
@@ -201,49 +203,66 @@ export async function httpRpc(server, message, signal, deadlineMs = 10_000) {
   });
 }
 
-async function startHttp(server) {
+async function startHttp(server, signal, deadline) {
   let id = 0;
-  const call = async (method, params, signal) => {
+  const rpc = async (method, params, callSignal, timeoutMs) => {
     const requestId = ++id;
-    const reply = await httpRpc(server, { jsonrpc: '2.0', id: requestId, method, params }, signal);
+    const reply = await httpRpc(server, { jsonrpc: '2.0', id: requestId, method, params }, callSignal, timeoutMs);
     if (!exact(reply, ['jsonrpc', 'id', 'result', 'error']) || reply.jsonrpc !== '2.0' || reply.id !== requestId || !plain(reply.result) || reply.error !== undefined) throw new Error('Approved MCP protocol error');
     return reply.result;
   };
-  const initialize = await call('initialize', { protocolVersion: MCP_VERSION, capabilities: {}, clientInfo: { name: 'pi-mcp-approved', version: '1.0.0' } });
+  const startup = (method, params) => rpc(method, params, signal, Math.max(1, deadline - Date.now()));
+  const initialize = await startup('initialize', { protocolVersion: MCP_VERSION, capabilities: {}, clientInfo: { name: 'pi-mcp-approved', version: '1.0.0' } });
   if (initialize.protocolVersion !== MCP_VERSION || !plain(initialize.capabilities) || !plain(initialize.serverInfo)) throw new Error('Approved MCP protocol error');
-  await httpRpc(server, { jsonrpc: '2.0', method: 'notifications/initialized' });
-  const listed = await call('tools/list', {});
+  await httpRpc(server, { jsonrpc: '2.0', method: 'notifications/initialized' }, signal, Math.max(1, deadline - Date.now()));
+  const listed = await startup('tools/list', {});
   if (!pinnedMcpDiscovery(server.tools, listed.tools)) throw new Error('Approved MCP discovery mismatch');
-  return { call: (name, args, signal) => call('tools/call', { name, arguments: args }, signal), close: async () => {} };
+  return { call: (name, args, callSignal) => rpc('tools/call', { name, arguments: args }, callSignal, 10_000), close: async () => {} };
 }
 
-async function startStdio(server) {
+async function startStdio(server, signal, deadline) {
   if (!immutablePackaged(server)) throw new Error('Approved MCP executable is not immutable and packaged');
   const client = new Client({ name: 'pi-mcp-approved', version: '1.0.0' }, { capabilities: {} });
   client.fallbackRequestHandler = () => { throw new Error('Server callbacks are disabled'); };
   for (const method of ['ping', 'tasks/get', 'tasks/result', 'tasks/list', 'tasks/cancel']) client.removeRequestHandler(method);
   const env = { HOME: '/tmp', LOGNAME: 'mcp', PATH: '/usr/bin:/bin', SHELL: '/bin/false', TERM: 'dumb', USER: 'mcp', ...server.env };
   const transport = new StdioClientTransport({ command: server.command, args: server.args, cwd: server.cwd, env, stderr: 'ignore', maxBufferSize: MAX_HTTP_BYTES });
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 10_000);
+  const remaining = () => Math.max(1, deadline - Date.now());
+  const aborted = () => new Promise((_resolve, reject) => {
+    if (signal.aborted) { reject(new Error('Approved MCP startup aborted')); return; }
+    signal.addEventListener('abort', () => reject(new Error('Approved MCP startup aborted')), { once: true });
+  });
   try {
-    await Promise.race([client.connect(transport), new Promise((_resolve, reject) => timeout.signal.addEventListener('abort', () => reject(new Error('Approved MCP startup timeout')), { once: true }))]);
-    const listed = await client.listTools(undefined, { timeout: 10_000 });
+    await Promise.race([client.connect(transport), aborted()]);
+    const listed = await Promise.race([client.listTools(undefined, { timeout: remaining(), signal }), aborted()]);
     if (listed.nextCursor || !pinnedMcpDiscovery(server.tools, listed.tools)) throw new Error('Approved MCP discovery mismatch');
     return { call: (name, args, signal) => client.callTool({ name, arguments: args }, undefined, { timeout: 10_000, signal }), close: () => client.close() };
   } catch (error) { await client.close().catch(() => {}); throw error; }
-  finally { clearTimeout(timer); }
 }
 
-export async function registerApprovedMcp(pi, policy) {
+export async function registerApprovedMcp(pi, policy, { connectSession } = {}) {
   const config = validateApprovedMcp(policy.approvedMcp);
   if (!config.servers.length) return { toolNames: [], close: async () => {} };
   const names = approvedMcpToolNames(config, policy.mode);
+  const activeServers = config.servers.filter(server => server.tools.some(tool => policy.mode === 'implement' || server.reviewTools.includes(tool.name)));
+  if (!activeServers.length) return { toolNames: [], close: async () => {} };
   const existing = new Set((pi.getAllTools?.() ?? []).map(tool => tool.name));
   if (names.some(name => existing.has(name))) throw new Error('Approved MCP tool collision');
   const sessions = [];
+  const controller = new AbortController();
+  const deadline = Date.now() + MCP_STARTUP_BUDGET_MS;
+  const timer = setTimeout(() => controller.abort(new Error('Approved MCP startup timeout')), MCP_STARTUP_BUDGET_MS);
   try {
-    for (const server of config.servers) sessions.push({ server, session: server.transport === 'stdio' ? await startStdio(server) : await startHttp(server), active: 0 });
+    const attempts = activeServers.map(async server => {
+      const session = connectSession ? await connectSession(server, controller.signal, deadline) : server.transport === 'stdio' ? await startStdio(server, controller.signal, deadline) : await startHttp(server, controller.signal, deadline);
+      if (controller.signal.aborted) { await session.close().catch(() => {}); throw new Error('Approved MCP startup aborted'); }
+      sessions.push({ server, session, active: 0 });
+    });
+    await Promise.all(attempts).catch(async error => {
+      controller.abort(error);
+      await Promise.allSettled(attempts);
+      throw error;
+    });
     for (const { server, session } of sessions) {
       for (const tool of server.tools) {
         const name = `mcp__${server.id}__${tool.name}`;
@@ -260,5 +279,6 @@ export async function registerApprovedMcp(pi, policy) {
       }
     }
     return { toolNames: names, close: async () => { await Promise.all(sessions.map(({ session }) => session.close().catch(() => {}))); } };
-  } catch (error) { await Promise.all(sessions.map(({ session }) => session.close().catch(() => {}))); throw error; }
+  } catch (error) { controller.abort(error); await Promise.all(sessions.map(({ session }) => session.close().catch(() => {}))); throw error; }
+  finally { clearTimeout(timer); }
 }

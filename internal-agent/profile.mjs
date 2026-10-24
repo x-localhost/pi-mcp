@@ -3,7 +3,7 @@ import { validateApprovedMcp } from '../src/approved-mcp.mjs';
 import { validateConfig } from '../src/config.mjs';
 
 const PI_CLI = '/app/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js';
-const PROFILE_KEYS = new Set(['piPath', 'piArgs', 'stateDir', 'allowedRoots', 'maxConcurrent', 'defaultTimeoutSeconds', 'maxTimeoutSeconds', 'defaultMaxTurns', 'provider', 'model', 'modelsFile', 'allowedCommands', 'envAllowlist', 'queue', 'verification', 'budgets', 'retention', 'artifacts', 'approvedMcp', 'offlineMaterials']);
+const PROFILE_KEYS = new Set(['piPath', 'piArgs', 'stateDir', 'allowedRoots', 'maxConcurrent', 'defaultTimeoutSeconds', 'maxTimeoutSeconds', 'defaultMaxTurns', 'provider', 'model', 'modelsFile', 'allowedCommands', 'envAllowlist', 'queue', 'verification', 'budgets', 'retention', 'artifacts', 'approvedMcp', 'offlineMaterials', 'acceptance', 'context', 'observation', 'session']);
 const PROVIDER_KEYS = new Set(['baseUrl', 'api', 'apiKey', 'models']);
 const MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxTokens', 'input']);
 
@@ -68,5 +68,8 @@ export async function loadAndValidateProfile() {
   }
   const profile = validateInternalProfile(JSON.parse(await fs.readFile('/etc/pi-internal/config.json', 'utf8')));
   validateInternalModels(JSON.parse(await fs.readFile('/etc/pi-internal/models.json', 'utf8')), profile);
+  // Only the packaged internal profile can opt the worker into diagnostic
+  // correlation headers. The worker also checks its fixed provider and paths.
+  process.env.PI_INTERNAL_GATEWAY_VALIDATED = '1';
   return profile;
 }
