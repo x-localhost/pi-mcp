@@ -109,14 +109,47 @@ const addUsage = usage => {
 };
 const writePrivate = (name, text) => fs.writeFile(path.join(dir, name), clean(text), { mode: 0o600 });
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Resolves once Pi has either emitted agent_settled or actually exited, or
+// `timeoutMs` has elapsed, whichever comes first. Used by stop() to give Pi a
+// bounded chance to finish processing `abort` (and write its own terminal
+// session state) before its process group is signalled.
+function waitForSettledOrExit(timeoutMs) {
+  return new Promise(resolve => {
+    if (settled || child.exitCode !== null || timeoutMs <= 0) { resolve(); return; }
+    let timer;
+    const done = () => { clearTimeout(timer); rpc.off('agent_settled', done); child.off('exit', done); resolve(); };
+    timer = setTimeout(done, timeoutMs);
+    rpc.once('agent_settled', done);
+    child.once('exit', done);
+  });
+}
 async function stop(reason) {
-  if (stopping) return;
-  stopping = reason; job.lastProgress = `Stopping: ${reason}`; await save();
-  if (rpc && child?.exitCode === null) {
-    await rpc.request('clear_queue', {}, 1000).catch(() => {});
-    rpc.request('abort', {}, 2000).catch(() => {});
-  }
-  if (job.piIdentity) stopPromise = stopOwnedGroup(job.piIdentity, 1500).catch(() => ({ state: 'ambiguous' }));
+  if (stopping) return stopPromise;
+  stopping = reason;
+  // Assign the whole stop sequence to stopPromise synchronously (before any
+  // await below), not just its final stopOwnedGroup call. run()'s own
+  // `stopping`-polling loop can notice `stopping` and let finalize() proceed
+  // within ~100ms, well before the grace wait below completes; finalize()
+  // must await this same promise (see finalizeOnce()) so it never races a
+  // signal against Pi's own graceful shutdown.
+  stopPromise = (async () => {
+    job.lastProgress = `Stopping: ${reason}`; await save();
+    if (rpc && child?.exitCode === null) {
+      await rpc.request('clear_queue', {}, 1000).catch(() => {});
+      const graceDeadline = Date.now() + 2000;
+      await rpc.request('abort', {}, 2000).catch(() => {});
+      // Pi needs a chance to actually process the abort (finish its current
+      // write, emit an aborted assistant message) before its process group
+      // is signalled; killing it right after merely queuing the abort
+      // request raced it against delivery and could leave a partial session
+      // write with no `aborted` message. Bounded so a Pi that never settles
+      // or exits does not block the overall stop/cancel path indefinitely.
+      if (child.exitCode === null) await waitForSettledOrExit(Math.max(0, graceDeadline - Date.now()));
+    }
+    // null: no Pi identity yet; finalize() then stops the group itself if Pi spawned later.
+    return job.piIdentity ? stopOwnedGroup(job.piIdentity, 1500).catch(() => ({ state: 'ambiguous' })) : null;
+  })();
+  return stopPromise;
 }
 async function inventory() {
   try {
@@ -178,7 +211,26 @@ async function run() {
   child = spawn(runtime.piPath, args, { cwd: job.worktree, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, PI_CODING_AGENT_DIR: runtime.agentDir, PI_MCP_POLICY: policyFile, PI_OFFLINE: '1', PI_TELEMETRY: '0', PI_SKIP_VERSION_CHECK: '1', DO_NOT_TRACK: '1' } });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-  job.piPid = child.pid; job.piIdentity = await processIdentity(child.pid); await save();
+  job.piPid = child.pid;
+  try {
+    job.piIdentity = await processIdentity(child.pid);
+  } catch (identityError) {
+    // Pi is this worker's own direct child, spawned detached as its own
+    // process-group leader (pgid === pid). If it already exited before this
+    // process could read its /proc identity, verify — using this worker's
+    // own boot id and pid namespace, which the child always inherits — that
+    // no member of that exact process group is still alive before treating
+    // Pi as stopped. A surviving descendant in the same group, or anything
+    // this cannot verify, keeps today's fail-closed quarantine.
+    const self = await processIdentity(process.pid).catch(() => null);
+    const outcome = self
+      ? await groupState({ pid: child.pid, pgid: child.pid, bootId: self.bootId, pidNamespace: self.pidNamespace, startTicks: '0' }).catch(() => ({ state: 'ambiguous', members: [] }))
+      : { state: 'ambiguous', members: [] };
+    if (outcome.state !== 'stopped') throw identityError;
+    job.piExitedBeforeIdentity = true; job.piPid = null; await save();
+    throw new Error('Pi exited during startup');
+  }
+  await save();
   rpc = new RpcClient(child.stdout, child.stdin);
   child.stderr.on('data', chunk => { stderrBytes += chunk.length; if (stderrBytes > 2 * 1024 * 1024) { stderrOverflow = true; stderrChunks = []; } else if (!stderrOverflow) stderrChunks.push(chunk); });
   let fatal;
@@ -343,7 +395,7 @@ async function finalizeOnce() {
   piActive = false;
   job.status = 'finalizing'; job.heartbeatAt = now(); await save();
   await observedSessionUsage();
-  const outcome = job.piIdentity ? await (stopPromise || stopOwnedGroup(job.piIdentity, 500)) : job.piPid ? { state: 'ambiguous' } : { state: 'stopped' };
+  const outcome = job.piIdentity ? (await stopPromise ?? await stopOwnedGroup(job.piIdentity, 500).catch(() => ({ state: 'ambiguous' }))) : job.piPid ? { state: 'ambiguous' } : { state: 'stopped' };
   if (outcome.state !== 'stopped') {
     await drainWatchdog(); job.status = 'quarantined'; job.error = 'Pi process group could not be proved stopped';
     job.execution = { status: 'quarantined', stopReason: finalStopReason || null };
