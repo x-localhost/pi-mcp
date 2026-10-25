@@ -60,3 +60,21 @@ Independent read-only review (`fable-reviewer`) of `src/`, `internal-agent/`, `s
 - Tests on gram only, in Docker image `pi-mcp-llmres:base-20261025` (node:24.22.0-bookworm + rg/fd + locked deps) with `--network none`, via `/tmp/pi-mcp-llm-resilience-20261025/run-suite.sh <srcdir> <container-name> [test files]`. Each unit copies its worktree to its own `/tmp/pi-mcp-llm-resilience-20261025/<unit>/` and uses unique container names. gram `/home` is full, so Docker client commands that need config must set `DOCKER_CONFIG=/tmp/pi-mcp-llm-resilience-20261025/dockercfg`.
 - TDD: each behaviour gets a failing test first (RED recorded), then GREEN. Unit A must include a real Pi 1.4.0 test against a local mock HTTPS/HTTP gateway returning an empty completion first and a valid one second.
 - Integration: A, B, then C serially into the integration branch; full suite on the integrated commit; independent review; ff-merge to clean local `main`. No push, publish, deploy or paid model calls.
+
+## Results — 2026-10-25
+
+All runs on gram, image `pi-mcp-llmres:base-20261025`, `--network none`.
+
+| Step | Commit | Evidence |
+| --- | --- | --- |
+| Baseline `main` | `0fd464f` | full suite 384/384 |
+| Unit A worker recovery (Sonnet) + lead fix for tool-call-only final replies | `4723fda` | RED 40/50, GREEN 50/50 incl. real Pi 1.4.0 empty-then-valid mock; full 434/434 |
+| Unit C1 review fixes (Sonnet) + lead fixes: launch identity in `worker-identity.json` (no stale job.json rewrite), no-op stdin error listener after close | `c82ea57` | RED 0/12, GREEN 12/12; full 396/396; lead rerun 43/43 |
+| Unit C2 worker review fixes (Sonnet) + lead fix: stop before Pi identity no longer resolves "ambiguous" | `1560c0a` | RED 2 failing, GREEN 3/3 x3; full 437/437; lead rerun 73/73 |
+| Unit B gateway retry (Sonnet), on by default after lead review | `20d4b72`, merge `2ecbfae` | resilience 11/11, gateway suites 22/22; integrated full 460/460 |
+| Final independent review (native Fable reviewer) | `2ecbfae` | approve, no blocking defects; 6 non-blocking notes |
+| Follow-ups for those notes (Sonnet) | merge `58e5f6a` | 7 new tests RED then GREEN; full 467/467 on the identical tree |
+
+Source review findings fixed: dispatcher dying on a busy submit lock; RPC stdin EPIPE crash; quarantine dead-ends for a worker or Pi that died before identity capture; stale terminal-status list in artifact export; retention scan bound breaking admission/health; abrupt Pi kill on stop.
+
+Not done: Codex bridge stayed at its 2-job cap from other sessions, so no Astra design consult or review ran; the native Fable reviewer substituted for the independent review. Real corporate LLM behaviour under load is not measured; only mocks were used.
