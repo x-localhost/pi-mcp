@@ -262,6 +262,64 @@ test('Manager.wait stops before onProgress when the signal aborts during an in-f
   assert.deepEqual(result.pending, [id]);
 });
 
+// Shared by the two direct Manager.wait tests below: a bare pending job,
+// with no worker and no worktree, sufficient for status()/public() to read
+// without touching git at all.
+async function makePendingJob(manager) {
+  const id = `task-${randomUUID()}`;
+  await fs.mkdir(manager.jobDir(id), { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(manager.jobDir(id), 'job.json'),
+    JSON.stringify({ id, status: 'running', createdAt: new Date().toISOString(), title: 'Hang' }));
+  return id;
+}
+
+test('Manager.wait stops reading further job_ids once the signal aborts mid-sweep, before the polling loop starts', { timeout: 10000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-mcp-wait-manager-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateDir = path.join(root, 'state');
+
+  // Aborts right as the SECOND job_id's initial status() read happens, so a
+  // fix that only checks signal.aborted once (at entry, or only inside the
+  // polling loop) would still go on to read the third id; this proves the
+  // sweep itself is checked between reads.
+  class AbortingDuringSweepManager extends Manager {
+    constructor(...args) { super(...args); this.pollCount = 0; this.controller = null; }
+    async status(id, waitSeconds) {
+      this.pollCount++;
+      if (this.pollCount === 2) this.controller.abort();
+      return super.status(id, waitSeconds);
+    }
+  }
+  const manager = await new AbortingDuringSweepManager({ stateDir, allowedRoots: [root] }, {}, { spawnWorker: false }).init();
+  const ids = [await makePendingJob(manager), await makePendingJob(manager), await makePendingJob(manager)];
+
+  const controller = new AbortController();
+  manager.controller = controller;
+  const result = await manager.wait(ids, { waitSeconds: 30, signal: controller.signal });
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(manager.pollCount, 2, 'the third job_id must never be read once the signal aborted on the second');
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(result.jobs, []);
+});
+
+test('Manager.wait with wait_seconds:0 performs exactly one status() call per job_id, proving no polling round runs', { timeout: 10000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-mcp-wait-manager-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateDir = path.join(root, 'state');
+
+  class CountingManager extends Manager {
+    constructor(...args) { super(...args); this.statusCalls = 0; }
+    async status(id, waitSeconds) { this.statusCalls++; return super.status(id, waitSeconds); }
+  }
+  const manager = await new CountingManager({ stateDir, allowedRoots: [root] }, {}, { spawnWorker: false }).init();
+  const ids = [await makePendingJob(manager), await makePendingJob(manager), await makePendingJob(manager)];
+
+  const result = await manager.wait(ids, { waitSeconds: 0 });
+  assert.equal(manager.statusCalls, ids.length, 'wait_seconds:0 must make exactly one status() call per job_id, with no extra polling round');
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(result.pending, ids);
+});
+
 test('two pi_wait calls on the same job proceed independently in parallel', { timeout: 20000 }, async t => {
   const session = await setup(); cleanup(t, session); const { repository, call } = session;
   const hangJob = payload(await call('pi_delegate', { repository, title: 'Hang', prompt: '[FAKE_HANG]' }));

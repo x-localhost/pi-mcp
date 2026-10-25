@@ -635,12 +635,16 @@ export class Manager {
     if (new Set(ids).size !== ids.length) throw new Error('Duplicate job_ids');
     const mode = until === 'all' ? 'all' : 'any';
     const seconds = Math.min(Math.max(Number(waitSeconds) || 0, 0), 300);
-    // Already aborted before any job is even read: the caller is gone, so skip
-    // straight to stopping rather than paying for a round of status reads
-    // whose result (like every other return from an aborted call) is discarded.
-    if (signal?.aborted) return { until: mode, timedOut: true, elapsedSeconds: 0, settled: [], pending: [...ids], jobs: [] };
     const settledJobs = new Map(); const pendingJobs = new Map();
+    // The caller is gone, so skip straight to stopping rather than paying for
+    // more status reads (here, or below) whose result — like every other
+    // return from an aborted call — is discarded; unread ids are reported
+    // pending rather than summarized, since they were never observed.
+    const earlyAbort = () => ({ until: mode, timedOut: true, elapsedSeconds: 0,
+      settled: [...settledJobs.keys()], pending: ids.filter(jobId => !settledJobs.has(jobId)), jobs: [] });
+    if (signal?.aborted) return earlyAbort();
     for (const jobId of ids) {
+      if (signal?.aborted) return earlyAbort();
       let job;
       try { job = await this.status(jobId, 0); }
       catch (error) { throw error.code === 'ENOENT' ? new Error(`Job not found: ${jobId}`) : error; }
@@ -873,23 +877,29 @@ export class Manager {
       const checkpoint = await readCheckpoint(jobDir);
       const stagingDir = path.join(stagingRoot, `patch-${randomUUID()}`);
       await fs.mkdir(stagingDir, { mode: 0o700 });
-      const { candidates, omittedPaths, reasons } = await stagePublicSide({ jobDir, manifest, checkpoint, stagingDir, sanitize, env: this.childEnv, secrets })
+      const { candidates, omittedPaths, omittedCount, reasons } = await stagePublicSide({ jobDir, manifest, checkpoint, stagingDir, sanitize, env: this.childEnv, secrets })
         .catch(async error => { await fs.rm(stagingDir, { recursive: true, force: true }); throw error; });
-      return { jobDir, repository, baseCommit: job.baseCommit, manifest, stagingDir, candidates, omittedPaths, reasons, key };
+      return { jobDir, repository, baseCommit: job.baseCommit, manifest, stagingDir, candidates, omittedPaths, omittedCount, reasons, key };
     });
     if (prepared.cached) return this.patchPage(id, prepared.jobDir, prepared.cached.descriptor, prepared.cached.bytes, offset, max_bytes, include_text);
-    const { jobDir, repository, baseCommit, manifest, stagingDir, candidates, omittedPaths, reasons, key } = prepared;
+    const { jobDir, repository, baseCommit, manifest, stagingDir, candidates, omittedPaths, omittedCount, reasons, key } = prepared;
     const bounds = validateArtifactConfig(this.config.artifacts);
     let result;
-    try { result = await completeAndRunDiff({ repository, baseCommit, candidates, stagingDir, bounds, sanitize, env: this.childEnv, secrets }); }
+    try { result = await this.buildPatch({ repository, baseCommit, candidates, stagingDir, bounds, sanitize, env: this.childEnv, secrets }); }
     finally { await fs.rm(stagingDir, { recursive: true, force: true }); }
     const allReasons = new Set([...reasons, ...result.reasons]);
     if (!manifest.exportComplete) allReasons.add('export_incomplete');
-    const omittedList = [...omittedPaths];
+    // The display list is a deduped Set (distinct paths can sanitize to the
+    // same displayed string), so its size can undercount; the true total is
+    // manifest.omittedCount (snapshot-time omissions, including any beyond
+    // the manifest's own stored, capped omissions array) plus every entry or
+    // candidate this method itself dropped in phase 1 and phase 2.
+    const omittedList = [...new Set([...omittedPaths, ...result.omittedPaths])];
+    const totalOmittedCount = manifest.omittedCount + omittedCount + result.droppedCount;
     const descriptor = { version: 1, generator, key, manifestSha256: manifest.manifestSha256, baseCommit, sha256: sha(result.bytes),
       totalBytes: result.bytes.length, encoding: textBytes(result.bytes) === null ? 'base64' : 'utf8', applicable: allReasons.size === 0,
       notApplicableReasons: [...allReasons].sort(), files: result.files.slice(0, 256), filesTruncated: result.files.length > 256,
-      omittedPaths: omittedList.slice(0, 200), omittedPathsTruncated: omittedList.length > 200, omittedCount: omittedList.length,
+      omittedPaths: omittedList.slice(0, 200), omittedPathsTruncated: omittedList.length > 200, omittedCount: totalOmittedCount,
       inputSnapshotDigest: manifest.inputSnapshotDigest, inputMaterialsDigest: manifest.inputMaterialsDigest };
     // files and omittedPaths are both capped above so the published descriptor
     // stays well under readCached()'s own 1 MiB read bound for patch.json and
@@ -919,6 +929,13 @@ export class Manager {
     });
     return this.patchPage(id, jobDir, published, result.bytes, offset, max_bytes, include_text);
   }
+  // Seam for tests: patch()'s phase 2 (the actual diff build) always runs
+  // through this one method rather than calling completeAndRunDiff()
+  // directly, so a test subclass can override it to run arbitrary code —
+  // e.g. a real pi_cleanup through a second Manager instance — while the
+  // build is genuinely in flight and the job is not locked, then delegate to
+  // the real build.
+  async buildPatch(args) { return completeAndRunDiff(args); }
   // Implementation detail of patch(): turns a cached/freshly-built descriptor
   // plus its full bytes into one bounded output page.
   patchPage(jobId, jobDir, descriptor, bytes, offset, maxBytes, includeText) {
