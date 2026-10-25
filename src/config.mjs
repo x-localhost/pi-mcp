@@ -97,7 +97,7 @@ function normalizeBudgets(raw = {}) {
 function normalizeRetention(raw = {}) {
   strictObject(raw, ['maxStateBytes', 'maxScanEntries', 'terminalDays'], 'retention');
   return { maxStateBytes: bounded(raw, 'maxStateBytes', 4 * 1024 * 1024 * 1024, 1048576, 1024 * 1024 * 1024 * 1024, 'retention'),
-    maxScanEntries: bounded(raw, 'maxScanEntries', 100000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
+    maxScanEntries: bounded(raw, 'maxScanEntries', 1000000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
 }
 export function validateCompletionSections(raw = {}, configDir = '/') {
   strictObject(raw, TOP_LEVEL_FIELDS, 'completion');

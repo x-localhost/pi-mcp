@@ -86,7 +86,7 @@ function textBytes(bytes) {
 function sanitizeReportJson(decoded, sanitize, env) {
   let parsed;
   try { parsed = JSON.parse(decoded); } catch { return sanitize(decoded, env); }
-  const statuses = new Set(['queued', 'starting', 'running', 'finalizing', 'completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'quarantined', 'passed', 'pending', 'not_requested', 'skipped', 'unverified', 'mutated_or_incomplete', 'received', 'unknown']);
+  const statuses = new Set(['queued', 'starting', 'running', 'finalizing', 'completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'context_limit', 'idle_timeout', 'tool_failure_limit', 'quarantined', 'passed', 'pending', 'not_requested', 'skipped', 'unverified', 'mutated_or_incomplete', 'received', 'unknown']);
   const stopReasons = new Set(['stop', 'end_turn', 'error', 'aborted', 'other']);
   const reasons = new Set(['result_size_limit', 'public_output_limit', 'report_size_limit']);
   const visit = (value, key = '') => {

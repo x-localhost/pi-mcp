@@ -5,10 +5,14 @@ const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 export class RpcClient extends EventEmitter {
   constructor(input, output) {
     super(); this.input = input; this.output = output; this.nextId = 0; this.pending = new Map(); this.buffer = '';
-    this.decoder = new StringDecoder('utf8');
+    this.decoder = new StringDecoder('utf8'); this.closed = false; this.closeError = null;
     input.on('data', chunk => this.feed(this.decoder.write(chunk)));
     input.on('end', () => this.fail(new Error('RPC stream ended')));
     input.on('error', error => this.fail(error));
+    // Pi's stdin (our write side). A late request after Pi has exited can hit
+    // EPIPE here; without a listener that becomes an uncaught exception in
+    // the worker instead of a rejected request.
+    output.on('error', error => this.fail(error));
   }
   feed(text) {
     this.buffer += text;
@@ -29,6 +33,7 @@ export class RpcClient extends EventEmitter {
     if (Buffer.byteLength(this.buffer) > MAX_FRAME_BYTES) { this.fail(new Error('RPC frame exceeds 4 MiB')); this.input.destroy(); }
   }
   request(type, fields = {}, timeoutMs = 15000) {
+    if (this.closed) return Promise.reject(this.closeError || new Error('RPC closed'));
     const id = `rpc-${++this.nextId}`;
     const frame = JSON.stringify({ id, type, ...fields }) + '\n';
     if (Buffer.byteLength(frame) > MAX_FRAME_BYTES) return Promise.reject(new Error('RPC outbound frame exceeds 4 MiB'));
@@ -50,6 +55,10 @@ export class RpcClient extends EventEmitter {
       this.once('closed', closed);
     });
   }
-  fail(error) { for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); } this.pending.clear(); this.emit('closed', error); }
-  close() { this.input.removeAllListeners('data'); this.input.removeAllListeners('end'); this.input.removeAllListeners('error'); this.fail(new Error('RPC closed')); }
+  fail(error) {
+    if (this.closed) return;
+    this.closed = true; this.closeError = error;
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); } this.pending.clear(); this.emit('closed', error);
+  }
+  close() { this.input.removeAllListeners('data'); this.input.removeAllListeners('end'); this.input.removeAllListeners('error'); this.output.removeAllListeners('error'); this.output.on('error', () => {}); this.fail(new Error('RPC closed')); }
 }

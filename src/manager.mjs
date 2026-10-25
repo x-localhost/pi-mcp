@@ -10,7 +10,7 @@ import { validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
 import { withOwnershipLock } from './ownership.mjs';
 import { appendJobEvent, readJobEvents } from './events.mjs';
 import { applyOfflineMaterials } from './offline-materials.mjs';
-import { identityState, groupState, stopOwnedGroup } from './ownership.mjs';
+import { identityState, groupState, stopOwnedGroup, processIdentity } from './ownership.mjs';
 import { scanState } from './storage.mjs';
 import { normalizeImages } from './images.mjs';
 import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts } from './artifacts.mjs';
@@ -22,6 +22,11 @@ const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const active = new Set(['starting', 'running', 'finalizing', 'quarantined']);
 const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'context_limit', 'idle_timeout', 'tool_failure_limit']);
+// Single source of truth for which job statuses are terminal, reused by
+// internal-agent/export-artifacts.mjs so its own export gate cannot drift
+// out of sync with this list (a stale inline copy there once omitted
+// context_limit, idle_timeout and tool_failure_limit).
+export const TERMINAL_STATUSES = terminal;
 const idPattern = /^task-[0-9a-f-]{36}$/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => new Date().toISOString();
@@ -30,6 +35,13 @@ const stable = value => JSON.stringify(value, (_key, item) => item && !Array.isA
 const admissionHash = (input, repository, parentId = null, forkFromId = null, codeOnly = false, reviewSourceId = null, rolloverFromId = null) =>
   sha(stable({ ...input, repository, parentId, forkFromId, codeOnly, reviewSourceId, rolloverFromId }));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; } };
+// scanState's own "State scan bound exceeded" is intentionally fail-closed and
+// stays as-is at its own call sites (test/completion-runtime.test.mjs asserts
+// /scan bound/i directly on scanState). Admission, submission and health only
+// rewrite that specific message into one an operator can act on.
+const actionableScanError = error => /scan bound/i.test(error.message)
+  ? new Error('State scan bound exceeded; run pi_cleanup or raise retention.maxScanEntries')
+  : error;
 export function fixedGatewayTraceEligible(validated, config, job, models) {
   return validated === true && config.configFile === '/etc/pi-internal/config.json' && config.provider === 'corporate' &&
     job.provider === 'corporate' && job.model === config.model && config.modelsFile === '/etc/pi-internal/models.json' &&
@@ -133,6 +145,13 @@ export class Manager {
       });
       await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
       child.unref(); await fs.writeFile(path.join(dir, 'worker.pid'), String(child.pid), { mode: 0o600 });
+      // Record the worker's process identity immediately in a separate file.
+      // If the worker dies before its own first save of job.workerIdentity,
+      // recoverJob() can still prove ownership instead of reporting 'unknown'
+      // forever. A separate file avoids rewriting job.json from this stale
+      // copy while the worker may already be saving its own state.
+      const earlyIdentity = await processIdentity(child.pid).catch(() => null);
+      if (earlyIdentity) await atomicJson(path.join(dir, 'worker-identity.json'), earlyIdentity);
     }
   }
   async dispatchOnce() {
@@ -157,7 +176,9 @@ export class Manager {
           if (await this.repository(job.repository) !== job.repository) throw new Error('Queued repository no longer allowed');
           await this.validateHeaders(job.provider, job.model);
           if (this.config.retention) {
-            const usage = await scanState(this.config.stateDir, this.config.retention);
+            let usage;
+            try { usage = await scanState(this.config.stateDir, this.config.retention); }
+            catch (error) { throw actionableScanError(error); }
             if (!usage.withinLimit) throw new Error('State soft storage admission limit reached');
           }
           if (!job.parentJobId) await git(job.repository, ['worktree', 'add', '-b', job.branch, job.worktree, job.baseCommit], false, this.childEnv);
@@ -508,7 +529,9 @@ export class Manager {
       // (including followups) so an environment change cannot bypass this check.
       await this.validateHeaders(provider, model);
       if (this.config.retention) {
-        const usage = await scanState(this.config.stateDir, this.config.retention);
+        let usage;
+        try { usage = await scanState(this.config.stateDir, this.config.retention); }
+        catch (error) { throw actionableScanError(error); }
         if (!usage.withinLimit) throw new Error('State soft storage admission limit reached');
       }
       if (!this.config.queue && jobs.filter(job => active.has(job.status)).length >= this.config.maxConcurrent) throw new Error('Concurrency limit reached');
@@ -603,10 +626,19 @@ export class Manager {
       await atomicJson(path.join(this.jobDir(id), 'job.json'), job); return job;
     });
   }
+  async launchedWorkerIdentity(id) {
+    // Identity captured by launchWorker; trusted only if it names the recorded worker pid.
+    try {
+      const dir = this.jobDir(id);
+      const [record, pid] = await Promise.all([fs.readFile(path.join(dir, 'worker-identity.json'), 'utf8').then(JSON.parse), fs.readFile(path.join(dir, 'worker.pid'), 'utf8').then(Number)]);
+      return record && Number.isSafeInteger(record.pid) && record.pid === pid ? record : null;
+    } catch { return null; }
+  }
   async recoverJob(id, { terminate = false } = {}) {
     return this.lock(async () => {
       const job = await this.read(id);
       if (job.status !== 'quarantined') throw new Error('Only quarantined jobs may be recovered');
+      if (!job.workerIdentity) job.workerIdentity = await this.launchedWorkerIdentity(id);
       const worker = job.workerIdentity ? await groupState(job.workerIdentity) : { state: 'unknown' };
       const pi = job.piIdentity ? await groupState(job.piIdentity) : job.piPid ? { state: 'unknown' } : { state: 'stopped' };
       const verifiers = [];
@@ -761,11 +793,17 @@ export class Manager {
     const jobs = await this.all();
     const retentionDays = this.config.retention?.terminalDays ?? 30;
     const retentionCandidates = jobs.filter(job => terminal.has(job.status) && Date.now() - Date.parse(job.finishedAt || job.createdAt) >= retentionDays * 86400000);
+    let storage = null;
+    if (this.config.retention) {
+      // Health must stay usable even past the scan bound; report the problem
+      // instead of throwing it.
+      storage = await scanState(this.config.stateDir, this.config.retention).catch(error => ({ error: actionableScanError(error).message }));
+    }
     return { version, allowedRoots: this.config.allowedRoots, stateDir: this.config.stateDir, maxConcurrent: this.config.maxConcurrent,
       activeJobs: jobs.filter(job => active.has(job.status)).length,
       authenticationPresent: !!authenticationPresent,
       authenticationNote: 'Credential presence does not prove authentication.', requiredTools: { rg: await which('rg'), fd: await which('fd') },
-      storage: this.config.retention ? await scanState(this.config.stateDir, this.config.retention) : null,
+      storage,
       queuedJobs: jobs.filter(job => job.status === 'queued').length, retentionCandidateCount: retentionCandidates.length,
       retentionCandidateIdsPreview: retentionCandidates.slice(0, 20).map(job => job.id), retentionDays };
   }
