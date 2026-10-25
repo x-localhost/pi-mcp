@@ -24,6 +24,16 @@ stdio MCP 호출에는 개별 요청 타이머가 없습니다. `MCP_TOOL_TIMEOU
 
 출력이 25,000 토큰 또는 50,000자를 넘으면 파일로 저장되어 Claude가 필요할 때 읽습니다. 패치가 큰 경우 먼저 `pi_patch`에 `include_text: false`를 지정해 메타데이터를 확인한 뒤 페이지별로 읽으세요.
 
+## 서브에이전트로 쓰기
+
+`pi-worker`를 설치했다면 Claude Code에 이렇게 요청합니다. 저장소 경로(서버가 보는 경로)와 커밋된 SHA를 함께 알려 주세요.
+
+```text
+pi-worker 서브에이전트로 /work/project 의 a1b2c3d 기준에서 로그인 오류를 고치게 해줘. 수용 기준: test-login 검증 통과.
+```
+
+서브에이전트는 기본적으로 백그라운드에서 실행되고, 끝나면 작업 ID·상태·검토 의견·패치 위치를 돌려줍니다. 패치 적용은 메인 대화에서 검토 후 직접 합니다.
+
 ## 일반적인 작업 흐름
 
 기준 SHA는 커밋된 SHA여야 합니다. 응답의 `baseCommit`이 요청한 SHA와 같은지 확인하세요.
@@ -42,6 +52,9 @@ stdio MCP 호출에는 개별 요청 타이머가 없습니다. `MCP_TOOL_TIMEOU
 
 ```json
 {"name":"pi_result","arguments":{"job_id":"task-00000000-0000-4000-8000-000000000000"}}
+```
+
+```json
 {"name":"pi_patch","arguments":{"job_id":"task-00000000-0000-4000-8000-000000000000","include_text":false}}
 ```
 
@@ -51,6 +64,8 @@ stdio MCP 호출에는 개별 요청 타이머가 없습니다. `MCP_TOOL_TIMEOU
 git apply --check job.patch
 git apply job.patch
 ```
+
+같은 호스트에서는 `pi_patch` 응답의 `patchFile`(서버 파일 경로)을 그대로 `git apply`에 넘길 수 있습니다. 먼저 `sha256sum`으로 응답의 `sha256`과 같은지 확인하세요.
 
 독립 작업은 각각 위임한 다음, 정착한 ID를 다음 대기 요청에서 제거하면서 `until: "any"`로 기다릴 수 있습니다.
 
