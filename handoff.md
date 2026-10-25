@@ -1,23 +1,23 @@
 ## 현재 상태
 
-- 날짜: 2026-10-24 (Asia/Seoul). 이전 하네스 기능 보완에 이어 평가 러너 구현·오프라인 평가·검토·검증을 완료했음. 평가 관련 구현 차단 사항 없음.
-- 반영 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main`. 작업 브랜치/worktree: `codex/evaluation/integration`, `/Users/leebw/workspace/claude/pi-mcp-worktrees/evaluation`. 시작 main: `edff46ff3ca260a73cf8e6a6166d6080ca484b80`.
-- 기록 시점 HEAD/작업 커밋: `ca1feb2f73363bac49bdb9643adc9b05f484b23b` (이 별도 handoff 커밋 직전). 최종 검증 소스: `27c5eb22bcb18b6f0f2d88c891ff52ffdde8faa1`; 평가 구현: `acd9d63a680283eed8006a2e4afd313851126b1e`. 이후 변경은 문서뿐임.
-- 평가 기능: 버전 과제 10개, 독립 증거 판정, 코드/계약/과제/설정 식별자, 재생·비교 CLI, 제한 시간과 정확한 실행 재시도, 실제 Manager/fake-Pi 결과를 오프라인 기록으로 내보내는 경로.
-- 판정 보완: 원자료와 보고서 성공·집계의 일관성 검사, 누락 결과의 분모 유지, 필수 파일 존재와 삭제 구분, 실행 성공과 파일 보존 분리, 비공개 입력을 노출하지 않는 오류, 변경된 실행 소스의 live 시작 거부.
-- 재시도 상태는 Manager의 `stateDir/evaluation-runs`에 고정됨. 호환용 `--state-dir`을 바꿔도 기존 run ID의 설정·과제·코드 바인딩을 우회하지 못함.
-- gram의 커밋 소스 전체 회귀 **384/384**, 15 suites, 실패·취소·스킵0, exit0, 257310.363567ms. 평가 전용 **62/62**와 실제 fake-Pi CLI live→bundle→replay 통과.
-- 독립 Astra가 `73c42f7`의 평가 구현을 승인했으며 이후 평가 구현은 동일함. 전체 회귀에서 드러난 기존 준비 파일 JSON 읽기 경쟁은 테스트 네 줄로 수정, 영향 검사 6개를 5회 모두 통과한 뒤 전체 회귀를 다시 실행했음. 최초 383/384 실패도 보존.
-- 합성 baseline은 정상3/10, 의도한 부정·미확인7/10. regressed와 incomplete는 각각2/10이며 변경 과제와 누락·불완전 실행을 정확히 구분함. 반복 결과 byte-identical. 이 수치는 실제 모델 해결률이 아님.
-- 제한: 제공 증거의 일관성을 검사하며 출처를 암호학적으로 인증하지 않음. 파일 보존은 전체 API/지시 의미 보존을 뜻하지 않고, 재개 지표는 요청→job 멱등성임. Manager가 충분히 관찰하지 못한 재개 증거는 unknown 유지.
-- 실제 유료·사내 모델 성능은 측정하지 않음. 별도 live 평가에는 일치하는 과제 저장소·verifier·허용된 provider와 명시적 실행 승인이 필요함. 외부 model/auth/agent 파일 내용은 설정 fingerprint가 직접 고정하지 않으므로 필요하면 별도 고정해야 함.
-- 원격 작업 컨테이너·이미지 태그·소스/빌드 폴더5개 정리 확인. gram `/tmp/pi-harness-evaluation-evidence-20261024`에 로그/보고서/명령/메타데이터/정리 기록69개(체크섬 포함), 디렉터리0700·파일0600 보존. 이전 하네스 증거18개는 해시 동일.
-- 로컬 임시 조정 파일과 전용 bridge 설정은 제거. 기존·검토 worktree는 보존. live bridge 설정 SHA256·0644 권한은 시작과 동일하며 live MCP/global 설정·push·게시·배포 변경 없음.
-- 기존 하네스 런타임은 main 기준과 동일함: 인수 계약, 독립 리뷰, 세션 교체, 문맥·관측, 순차 워크플로와 격리 Pi 수용 검증은 [이전 기록](docs/harness-regression.md) 참조. Linux `/proc`·`flock` 등 운영 조건은 유지.
-- 정확한 명령·모델 역할·RED/GREEN·실패 이력·증거: [평가 검증](docs/evaluation-verification.md), [계획](docs/evaluation-plan.md), [독립 검토](docs/evaluation-review.md), [사용법/제약](docs/harness-evals.md).
-- 통합 절차: 이 handoff를 별도 커밋한 뒤 원래 main checkout의 브랜치·HEAD·tracked/untracked clean을 다시 확인하고 `--ff-only`로 반영. 필수 추가 구현·검증은 없으며 실제 모델 벤치마크는 별도 범위임.
+- 날짜: 2026-10-25 (Asia/Seoul). 사내 LLM의 빈 응답·비정상 응답 대응과 전체 소스 리뷰 결함 수정을 완료했음. 차단 사항 없음.
+- 반영 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main`. 통합 브랜치/worktree: `claude/llm-resilience/integration`, `/Users/leebw/workspace/claude/pi-mcp-worktrees/llm-resilience`. 시작 main `0fd464f`, 작업 최종 커밋 `3dee19a`(코드 최종 트리 `58e5f6a`).
+- worker 복구: Pi가 끝난 뒤 마지막 응답을 판정해 빈 응답·잘린 빈 응답·파싱 오류·재시도 소진 장애면 같은 세션에서 이어가기 프롬프트를 보냄. 기본 2회, 5초부터 지수 백오프, 설정 `providerRecovery`. 완료는 마지막 응답이 정상일 때만 인정. Pi 자체 자동 재시도도 명시적으로 켬. [사용법](docs/provider-resilience.md).
+- 사내 gateway: Pi에 한 바이트도 보내기 전이면 429/5xx·네트워크 오류·빈 스트림·깨진 JSON·내용 없는 응답을 최대 3회 재시도(지터 백오프, Retry-After 상한). 전송 시작 후 깨진 데이터는 연결을 끊어 Pi 재시도를 유도, 소진 시 503. 기본 켜짐, `retry.maxAttempts: 1`로 끔. [안내](docs/internal-agent.md).
+- 리뷰 결함 수정: dispatcher가 잠금 대기 오류로 조용히 죽던 문제, Pi stdin EPIPE 크래시, 신원 기록 전 종료 시 영구 격리, 아티팩트 export 종료 상태 누락, 보존 스캔 한도로 제출·health가 막히던 문제, 중지 시 Pi 즉시 강제 종료.
+- 검증(gram, `pi-mcp-llmres:base-20261025`, network none): 기준 main 384/384 → 최종 트리 전체 **467/467**. 실제 Pi 1.4.0이 모의 게이트웨이의 빈 응답 뒤 정상 응답으로 완료되는 테스트 포함. RED/GREEN·리드 수정 내역은 [결과](docs/llm-resilience-plan.md#results--2026-10-25).
+- 독립 리뷰: 네이티브 Fable reviewer 승인(차단 0), 비차단 6건 후속 반영. Codex bridge가 다른 세션 작업으로 계속 가득 차 Astra 설계 자문·검토는 실행하지 못했음.
+- 제한: 실제 사내 LLM 부하 상황은 측정하지 않음(모의만). gateway 재시도는 사내 전용 Docker 프로필에만 해당하고, 호스트 모드는 worker 복구와 Pi 자체 재시도로 대응.
+- 운영 메모: gram `/home`이 100% 차 있어 Docker 빌드 시 `DOCKER_CONFIG`를 /tmp로 지정해야 했음(정리하지 않음, 공유 자원). 원격 작업 디렉터리는 정리 완료.
+- 다음 단계: 실제 사내 환경에서 `providerRecovery`와 gateway `retry` 값을 관찰 후 조정. 필수 미완료 항목 없음.
 
 ## 작업 기록
+
+### 2026-10-25 — 사내 LLM 빈·비정상 응답 대응과 전체 소스 리뷰 수정
+- worker 이어가기 복구(`providerRecovery`)와 gateway 사전 검증·재시도 추가, 마지막 응답이 비어도 성공 처리되던 구멍 차단.
+- 리뷰 결함 6건(dispatcher·RPC·격리·export·스캔 한도·중지) 수정, 최종 리뷰 비차단 6건 후속 반영.
+- 작업 `3dee19a`(코드 `58e5f6a`); 전체 467/467, Fable reviewer 승인, Astra는 bridge 포화로 미실행.
+- 원격 작업 자원 정리, live/global 설정·push·배포 변경 없음.
 
 ### 2026-10-24 — 하네스 평가 구현 및 오프라인 평가 완료
 - 버전 과제·증거 grader·재생/비교·live 기록 경로와 정확한 재시도 상태 구현, 독립 검토 지적과 기존 테스트 읽기 경쟁 수정.
