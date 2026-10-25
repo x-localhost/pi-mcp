@@ -8,5 +8,6 @@
     "X-Corp-Client": "${CORP_CLIENT_ID}"
   },
   "limits": { "maxOutputTokens": 4096, "maxN": 1, "requestsPerMinute": 60 },
+  "retry": { "maxAttempts": 3, "baseDelayMs": 500, "maxDelayMs": 8000 },
   "mcpServers": []
 }

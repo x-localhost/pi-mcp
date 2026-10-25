@@ -87,6 +87,14 @@ def main():
     require(type(gateway_max_output_tokens) is int and 1 <= gateway_max_output_tokens <= 16384, "gateway maxOutputTokens must be an integer from 1 to 16384")
     require(model_max_tokens <= gateway_max_output_tokens, "model maxTokens exceeds gateway maxOutputTokens")
     require(gateway_config.get("caFile") == "/etc/pi-internal/ca.pem", "gateway CA path mismatch")
+    gateway_retry = gateway_config.get("retry")
+    if gateway_retry is not None:
+        require(isinstance(gateway_retry, dict) and set(gateway_retry) <= {"maxAttempts", "baseDelayMs", "maxDelayMs"}, "gateway retry config invalid")
+        for key, low, high in (("maxAttempts", 1, 5), ("baseDelayMs", 0, 10000), ("maxDelayMs", 0, 30000)):
+            if key in gateway_retry:
+                value = gateway_retry[key]
+                require(type(value) is int and low <= value <= high, f"gateway retry {key} out of range")
+        require(gateway_retry.get("maxDelayMs", 8000) >= gateway_retry.get("baseDelayMs", 500), "gateway retry maxDelayMs must be >= baseDelayMs")
     declared = config.get("approvedMcp", {"servers": []})
     require(isinstance(declared, dict) and set(declared) == {"servers"} and isinstance(declared["servers"], list), "approved MCP declaration invalid")
     agent_http = {server.get("id"): server for server in declared["servers"] if isinstance(server, dict) and server.get("transport") == "internal-http"}

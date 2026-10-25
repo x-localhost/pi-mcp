@@ -9,8 +9,11 @@ import { validateGatewayConfig, enforceChatLimits, validateMcpRpc, startGateway 
 import { startRelay } from '../internal-agent/relay.mjs';
 
 const schema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false };
+// Retry/validation is on by default; pinned to one attempt here because
+// these tests are about diagnostics, rate limiting and the MCP route, not
+// retry behaviour, and their upstream call counts must stay exact.
 const configRaw = { upstreamUrl: 'https://llm.corp.invalid/v1/chat/completions', upstreamAddress: '10.2.3.4', model: 'approved-model', headers: { Authorization: 'Bearer $LLM_KEY' },
-  limits: { maxOutputTokens: 256, maxN: 1, requestsPerMinute: 2 },
+  limits: { maxOutputTokens: 256, maxN: 1, requestsPerMinute: 2 }, retry: { maxAttempts: 1 },
   mcpServers: [{ id: 'docs', upstreamUrl: 'https://docs.corp.invalid/mcp', upstreamAddress: '10.2.3.5', headers: { Authorization: 'Bearer $MCP_KEY' }, backendAttested: true, tools: [{ name: 'read', description: 'Read a document', inputSchema: schema }] }] };
 const env = { LLM_KEY: 'llm-secret', MCP_KEY: 'mcp-secret' };
 const chat = { model: 'approved-model', messages: [{ role: 'user', content: 'hello' }], stream: true };
@@ -61,7 +64,7 @@ async function fixture(statusCode = 401, behavior = 'normal') {
       response.headers = statusCode === 200 ? { 'content-type': 'application/json', 'set-cookie': 'leak=1' } : { 'content-type': 'application/json', location: 'https://outside.invalid', 'set-cookie': 'leak=1' };
       callback(response);
       if (behavior === 'partial-error') { response.write('partial'); setImmediate(() => response.destroy(new Error('upstream stream failed'))); return; }
-      response.end(statusCode === 200 ? '{}' : 'secret-upstream-body');
+      response.end(statusCode === 200 ? '{"choices":[{"message":{"content":"ok"}}]}' : 'secret-upstream-body');
     });
     request.setTimeout = () => request;
     return request;
@@ -126,7 +129,12 @@ test('chat and approved MCP requests consume the same bounded rate bucket', asyn
   try {
     const ping = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
     assert.equal((await f.call('/internal-mcp/docs', ping)).status, 502);
-    assert.equal((await f.call('/v1/chat/completions', chat)).status, 502);
+    // The MCP route has no retry logic, so its 500 reflects straight through
+    // as 502. The chat route's 500 is retryable by category; with maxAttempts
+    // pinned to 1 (configRaw), exhausting that one allowed attempt reports
+    // its own exhaustion as 503 rather than reflecting the upstream status
+    // directly as 502 (same reasoning as the gateway's own resilience tests).
+    assert.equal((await f.call('/v1/chat/completions', chat)).status, 503);
     const rejected = await f.call('/internal-mcp/docs', ping);
     assert.equal(rejected.status, 429);
     assert.equal(rejected.headers['x-gateway-category'], 'rate_limit');
@@ -134,25 +142,36 @@ test('chat and approved MCP requests consume the same bounded rate bucket', asyn
   } finally { await f.close(); }
 });
 
-test('partial upstream chat stream is audited as aborted with failure category', async () => {
+test('partial upstream chat stream is contained as a clean failure, never leaked as a broken 200', async () => {
+  // Before Unit B, the gateway wrote response headers as soon as the
+  // upstream status/content-type looked fine and only then piped the body,
+  // so a reply that failed mid-body reached the client as an incomplete 200.
+  // Retry/validation buffers and fully validates a non-stream JSON body
+  // before writing anything, so a reply that fails mid-body (before full
+  // validation) can never commit; with maxAttempts pinned to 1 (configRaw),
+  // it is reported as a clean, complete 503 instead.
   const f = await fixture(200, 'partial-error');
   try {
     const result = await new Promise((resolve, reject) => {
       const data = JSON.stringify(chat);
       const req = http.request({ socketPath: f.gateway.socketPath, method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, res => {
-        res.resume();
-        res.on('close', () => resolve({ status: res.statusCode, complete: res.complete }));
+        const chunks = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode, complete: res.complete, body: Buffer.concat(chunks).toString() }));
         res.on('error', () => {});
       });
       req.on('error', reject); req.end(data);
     });
-    assert.equal(result.status, 200);
-    assert.equal(result.complete, false);
+    assert.equal(result.status, 503);
+    assert.equal(result.complete, true);
+    assert.equal(result.body, 'Upstream unavailable\n');
     const audit = f.gateway.auditSnapshot();
     assert.equal(audit.length, 1);
     assert.equal(audit[0].category, 'upstream');
-    assert.equal(audit[0].status, 200);
-    assert.equal(audit[0].completed, false);
-    assert.equal(audit[0].aborted, true);
+    assert.equal(audit[0].status, 503);
+    assert.equal(audit[0].completed, true);
+    assert.equal(audit[0].aborted, false);
+    assert.equal(audit[0].attempts, 1);
+    assert.equal(f.seen.length, 1);
   } finally { await f.close(); }
 });
