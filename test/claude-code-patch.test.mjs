@@ -466,6 +466,32 @@ test('pi_cleanup running between the unlocked build phase and publication makes 
   assert.deepEqual(remainingStaging, []);
 });
 
+test('pi_cleanup running during the active, unlocked build phase makes patch() reject without recreating the job or leaving a staging directory', async t => {
+  const { repository, manager, config } = await fixture(t);
+  const job = await admit(manager, repository);
+  await writeFile(path.join(job.worktree, 'base.txt'), 'changed during active build\n');
+  const { job: completed } = await finish(manager, job);
+
+  // buildPatch() is the seam patch() calls for its unlocked phase-2 build:
+  // override it to run a real pi_cleanup, through a second independent
+  // Manager instance racing for the real lock, while the build is genuinely
+  // still in flight (unlike the publish-phase-lock race above, nothing here
+  // is held or synchronized), then delegate to the real build.
+  class ActiveBuildCleanupManager extends Manager {
+    async buildPatch(args) {
+      const other = await new Manager({ ...config }, {}, { spawnWorker: false }).init();
+      await other.cleanup({ job_ids: [completed.id], dry_run: false });
+      return completeAndRunDiff(args);
+    }
+  }
+  const racing = await new ActiveBuildCleanupManager({ ...config }, {}, { spawnWorker: false }).init();
+  await assert.rejects(racing.patch(completed.id), /not found/i);
+  await assert.rejects(fs.access(manager.jobDir(completed.id)));
+  const stagingRoot = path.join(config.stateDir, 'patch-staging');
+  const remainingStaging = (await fs.readdir(stagingRoot).catch(() => [])).filter(name => /^patch-[0-9a-f-]{36}$/.test(name));
+  assert.deepEqual(remainingStaging, []);
+});
+
 test('a followup does not change the earlier job patch', async t => {
   const { repository, manager } = await fixture(t);
   const first = await admit(manager, repository);
@@ -530,4 +556,42 @@ test('a different secret-named child env value changes the cache key and is mask
   assert.equal(rotated.applicable, false);
   assert.ok(rotated.notApplicableReasons.includes('secret_bearing_export_binary'), JSON.stringify(rotated.notApplicableReasons));
   assert.equal(rotated.files.some(f => f.path === 'secret.bin'), false);
+  // The dropped candidate must be accounted for in the omission totals, not
+  // silently disappear: its (unchanged, since only its content was secret)
+  // path is listed, and the count reflects at least this one drop.
+  assert.ok(rotated.omittedPaths.includes('secret.bin'), JSON.stringify(rotated.omittedPaths));
+  assert.ok(rotated.omittedCount >= 1, String(rotated.omittedCount));
+});
+
+test('a secret inside a non-ASCII filename is excluded entirely, with no raw or quoted-octal leak, once that value is configured as a secret', async t => {
+  const { repository, manager, config } = await fixture(t);
+  const job = await admit(manager, repository);
+  // "ë" is U+00EB; git's default core.quotePath renders its UTF-8 bytes
+  // (0xC3 0xAB) as the quoted octal escape \303\253 in diff headers, which a
+  // literal-text sanitize pass cannot recognize as the configured secret.
+  const name = 'sëcret123.txt';
+  await writeFile(path.join(job.worktree, name), 'harmless content\n');
+  // An unrelated, ordinary change so the patch still has real content to
+  // inspect once the secret-named file is dropped — otherwise an empty
+  // patch would trivially (and uninformatively) contain no leak either way.
+  await writeFile(path.join(job.worktree, 'base.txt'), 'changed alongside the secret filename\n');
+  const { job: completed } = await finish(manager, job);
+  const plain = await manager.patch(completed.id);
+  assert.equal(plain.applicable, true);
+  assert.ok(plain.files.some(f => f.path === name), JSON.stringify(plain.files));
+
+  const rotated = await new Manager({ ...config }, { API_TOKEN: 'sëcret123' }, { spawnWorker: false }).init();
+  const page = await rotated.patch(completed.id);
+  assert.equal(page.applicable, false);
+  assert.ok(page.notApplicableReasons.includes('path_sanitized'), JSON.stringify(page.notApplicableReasons));
+  assert.equal(page.files.some(f => f.path === name), false);
+  assert.ok(page.files.some(f => f.path === 'base.txt'), JSON.stringify(page.files));
+  assert.ok(page.omittedPaths.some(p => p.includes('[redacted]')), JSON.stringify(page.omittedPaths));
+  assert.ok(page.omittedCount >= 1, String(page.omittedCount));
+  assert.match(page.text, /changed alongside the secret filename/);
+  assert.doesNotMatch(page.text, /sëcret123/);
+  // Neither the raw secret nor git's octal-escaped form of it ever reaches
+  // the patch bytes, because the entry is dropped before it is ever staged
+  // or diffed at all.
+  assert.doesNotMatch(page.text, /\\303\\253/);
 });
