@@ -16,6 +16,7 @@ import { appendJobEvent } from './events.mjs';
 import { normalizeImages, modelSupportsImages } from './images.mjs';
 import { POLICY_READY_TIMEOUT_MS } from './approved-mcp.mjs';
 import { extendAuthoritativeInstructions } from './session-transition.mjs';
+import { classifyFinalMessage, recoveryDelayMs } from './provider-recovery.mjs';
 
 process.umask(0o077);
 const exec = promisify(execFile);
@@ -23,12 +24,14 @@ const dir = process.argv[2];
 const jobFile = path.join(dir, 'job.json');
 let job = JSON.parse(await fs.readFile(jobFile, 'utf8'));
 const runtime = JSON.parse(await fs.readFile(path.join(dir, 'runtime.json'), 'utf8'));
+const providerRecoveryPolicy = runtime.providerRecovery || { maxAttempts: 2, baseDelayMs: 5000, maxDelayMs: 60000 };
+const CONTINUATION_PROMPT = 'The previous response was empty or malformed. Continue the task from the current state of the worktree without repeating steps that are already finished, and end your reply with a short summary.';
 let saveChain = Promise.resolve();
 const save = () => { const snapshot = structuredClone(job); saveChain = saveChain.then(() => atomicJson(jobFile, snapshot)); return saveChain; };
 const now = () => new Date().toISOString();
 const sessionRoot = await fs.realpath(job.sessionDir);
 let child, rpc, stopping, finalText = '', settled = false, piActive = false, finalStopReason, providerError = '', stderrChunks = [], stderrBytes = 0, stderrOverflow = false;
-let eventChain = Promise.resolve(), usageBaseline = null, stopPromise;
+let eventChain = Promise.resolve(), usageBaseline = null, stopPromise, lastAssistantMessage = null;
 const seenObservationIds = new Set();
 const secretValues = [];
 secretValues.push(...(runtime.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value)));
@@ -188,6 +191,7 @@ async function run() {
     }
     if (event.type === 'message_end' && event.message?.role === 'assistant') {
       const message = event.message;
+      lastAssistantMessage = message;
       finalStopReason = ['stop', 'end_turn', 'error', 'aborted'].includes(message.stopReason) ? message.stopReason : 'other';
       if (message.stopReason === 'error' || message.stopReason === 'aborted') providerError = message.errorMessage || message.stopReason;
       else if (message.stopReason === 'stop' || message.stopReason === 'end_turn') providerError = '';
@@ -249,21 +253,50 @@ async function run() {
   }
   usageBaseline = await rpc.request('get_session_stats', {}, 1000).then(response => response.data, () => null);
   if (job.thinkingLevel) await rpc.request('set_thinking_level', { level: job.thinkingLevel });
+  // Make Pi's own built-in retry (transient 429/5xx/timeout errors; see
+  // pi-ai dist/utils/retry.js) explicit. provider-recovery.mjs only takes
+  // over once that has already run out, or for anomalies Pi never retries
+  // (an empty/truncated reply, or a malformed/parse-error response).
+  await rpc.request('set_auto_retry', { enabled: true });
   if (stopping) throw new Error(`Stopped during startup: ${stopping}`);
-  const settledPromise = rpc.waitFor('agent_settled', (job.timeoutSeconds + 10) * 1000);
-  settledPromise.catch(() => {});
-  piActive = true;
-  const prompt = await rpc.request('prompt', { message: `${job.prompt}\n\nInspect worktree AGENTS.md with the confined read tool before modifying files. Work only in ${job.worktree}.`, ...(job.images?.length ? { images: job.images } : {}) });
-  if (prompt.data?.disposition !== 'started') throw new Error(`Unsupported prompt disposition: ${prompt.data?.disposition}`);
-  let watcher;
-  try {
-    await Promise.race([settledPromise, new Promise(resolve => { watcher = setInterval(() => { if (stopping || child.exitCode !== null || child.signalCode !== null) resolve(); }, 100); })]);
-  } finally { clearInterval(watcher); }
-  piActive = false;
-  if (fatal) throw fatal;
-  if (!settled && !stopping) throw new Error('Pi exited before agent_settled');
-  if (!stopping && (providerError || !['stop', 'end_turn'].includes(finalStopReason))) throw new Error(providerError || `Final stop reason: ${finalStopReason || 'missing'}`);
-  if (!stopping && !finalText.trim()) throw new Error('Pi settled without an assistant result');
+  const initialPromptMessage = `${job.prompt}\n\nInspect worktree AGENTS.md with the confined read tool before modifying files. Work only in ${job.worktree}.`;
+  job.providerRecovery = { attempts: 0, maxAttempts: providerRecoveryPolicy.maxAttempts, history: [] };
+  let classification = null;
+  for (let continuing = false; ; continuing = true) {
+    settled = false;
+    const settledPromise = rpc.waitFor('agent_settled', (job.timeoutSeconds + 10) * 1000);
+    settledPromise.catch(() => {});
+    piActive = true;
+    const prompt = await rpc.request('prompt', continuing
+      ? { message: CONTINUATION_PROMPT }
+      : { message: initialPromptMessage, ...(job.images?.length ? { images: job.images } : {}) });
+    if (prompt.data?.disposition !== 'started') throw new Error(`Unsupported prompt disposition: ${prompt.data?.disposition}`);
+    let watcher;
+    try {
+      await Promise.race([settledPromise, new Promise(resolve => { watcher = setInterval(() => { if (stopping || child.exitCode !== null || child.signalCode !== null) resolve(); }, 100); })]);
+    } finally { clearInterval(watcher); }
+    piActive = false;
+    if (fatal) throw fatal;
+    if (stopping) break;
+    if (!settled) throw new Error('Pi exited before agent_settled');
+    classification = classifyFinalMessage(lastAssistantMessage || {});
+    if (classification.healthy || !classification.recoverable) break;
+    if (job.providerRecovery.attempts >= job.providerRecovery.maxAttempts) break;
+    job.providerRecovery.attempts++;
+    job.providerRecovery.history = [...job.providerRecovery.history, { attempt: job.providerRecovery.attempts, reason: classification.reason, at: now() }].slice(-10);
+    await save();
+    const delayMs = recoveryDelayMs(providerRecoveryPolicy, job.providerRecovery.attempts);
+    await emitEvent({ type: 'provider_recovery', attempt: job.providerRecovery.attempts, reason: classification.reason, delayMs });
+    const waitUntil = Date.now() + delayMs;
+    while (!stopping && Date.now() < waitUntil) await delay(Math.min(100, waitUntil - Date.now()));
+    if (stopping) break;
+  }
+  if (!stopping && classification && !classification.healthy) {
+    // Any unhealthy final message fails; a stop/end_turn reply that is neither
+    // text nor recoverable (e.g. stray tool calls only) must not pass as success.
+    if (!classification.recoverable) throw new Error(providerError || (['stop', 'end_turn'].includes(finalStopReason) ? 'Pi settled without an assistant result' : `Final stop reason: ${finalStopReason || 'missing'}`));
+    else throw new Error(`Provider returned ${classification.reason} (recovery exhausted after ${job.providerRecovery.attempts} attempts)`);
+  }
 }
 
 let finalizing;

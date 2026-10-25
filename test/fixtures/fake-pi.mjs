@@ -21,7 +21,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   if (request.type === 'get_state') send({ type: 'response', id: request.id, command: request.type, success: true, data: { sessionFile, model: selectedModel } });
   else if (request.type === 'get_session_stats') send({ type: 'response', id: request.id, command: request.type, success: true,
     data: { tokens: { input: statsInput, output: 0, cacheRead: 0, cacheWrite: 0, total: statsInput }, cost: 0 } });
-  else if (['set_model', 'set_thinking_level', 'clear_queue', 'abort', 'steer'].includes(request.type)) {
+  else if (['set_model', 'set_thinking_level', 'set_auto_retry', 'clear_queue', 'abort', 'steer'].includes(request.type)) {
     if (request.type === 'set_model') selectedModel = process.env.FAKE_PI_SCENARIO === 'wrong_model'
       ? { provider: 'other', id: 'other' } : { provider: request.provider, id: request.modelId, input: process.env.FAKE_PI_IMAGE_SUPPORT ? ['text', 'image'] : ['text'] };
     send({ type: 'response', id: request.id, command: request.type, success: true, ...(request.type === 'set_model' ? { data: selectedModel } : request.type === 'steer' ? { data: { disposition: 'queued' } } : {}) });

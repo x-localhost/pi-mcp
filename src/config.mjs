@@ -49,7 +49,7 @@ const TOP_LEVEL_FIELDS = [
   'allowedCommands',
   'envAllowlist',
   'network',
-  'queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials', 'approvedMcp', 'context', 'observation',
+  'queue', 'verification', 'budgets', 'retention', 'artifacts', 'offlineMaterials', 'approvedMcp', 'context', 'observation', 'providerRecovery',
 ];
 
 function strictObject(raw, allowed, label) {
@@ -99,13 +99,26 @@ function normalizeRetention(raw = {}) {
   return { maxStateBytes: bounded(raw, 'maxStateBytes', 4 * 1024 * 1024 * 1024, 1048576, 1024 * 1024 * 1024 * 1024, 'retention'),
     maxScanEntries: bounded(raw, 'maxScanEntries', 100000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
 }
+// maxAttempts: 0 disables the worker's bounded continuation-prompt recovery
+// (see src/provider-recovery.mjs and docs/provider-resilience.md) entirely;
+// maxDelayMs must be at least baseDelayMs so the exponential backoff never
+// inverts.
+function normalizeProviderRecovery(raw = {}) {
+  strictObject(raw, ['maxAttempts', 'baseDelayMs', 'maxDelayMs'], 'providerRecovery');
+  const maxAttempts = bounded(raw, 'maxAttempts', 2, 0, 5, 'providerRecovery');
+  const baseDelayMs = bounded(raw, 'baseDelayMs', 5000, 0, 120000, 'providerRecovery');
+  const maxDelayMs = bounded(raw, 'maxDelayMs', 60000, 0, 600000, 'providerRecovery');
+  if (maxDelayMs < baseDelayMs) fail('providerRecovery.maxDelayMs', 'must be greater than or equal to baseDelayMs');
+  return { maxAttempts, baseDelayMs, maxDelayMs };
+}
 export function validateCompletionSections(raw = {}, configDir = '/') {
   strictObject(raw, TOP_LEVEL_FIELDS, 'completion');
   const section = (name) => raw[name] === undefined ? {} : raw[name];
   return { queue: normalizeQueue(section('queue')), verification: normalizeVerification(section('verification')),
     budgets: normalizeBudgets(section('budgets')), retention: normalizeRetention(section('retention')),
     artifacts: validateArtifactConfig(section('artifacts')), offlineMaterials: validateOfflineConfig(section('offlineMaterials'), configDir),
-    approvedMcp: validateApprovedMcp(raw.approvedMcp), context: normalizeContext(raw.context), observation: normalizeObservation(raw.observation) };
+    approvedMcp: validateApprovedMcp(raw.approvedMcp), context: normalizeContext(raw.context), observation: normalizeObservation(raw.observation),
+    providerRecovery: normalizeProviderRecovery(section('providerRecovery')) };
 }
 
 // Names that must never be reachable through the generic envAllowlist,
@@ -308,7 +321,7 @@ export function validateConfig(raw, configDir) {
   const authFile = normalizeOptionalPath(raw, 'authFile', configDir);
 
   const network = normalizeNetwork(raw.network, configDir);
-  const { queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation } = validateCompletionSections(raw, configDir);
+  const { queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation, providerRecovery } = validateCompletionSections(raw, configDir);
 
   return {
     piPath,
@@ -328,7 +341,7 @@ export function validateConfig(raw, configDir) {
     allowedCommands,
     envAllowlist,
     network,
-    queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation,
+    queue, verification, budgets, retention, artifacts, offlineMaterials, approvedMcp, context, observation, providerRecovery,
   };
 }
 
