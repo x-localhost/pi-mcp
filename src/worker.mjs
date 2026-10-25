@@ -48,15 +48,14 @@ const secretValues = [];
 secretValues.push(...(runtime.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value)));
 const refreshSecrets = async () => {
   const configs = {};
-  for (const name of ['auth.json', 'models.json']) {
-    try { configs[name] = JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); } catch {}
-  }
-  // collectConfigSecrets() is the shared walk (src/headers.mjs) over each
-  // config individually, same as calling it once per file here; a value
+  // collectConfigSecrets() is the shared walk (src/headers.mjs); a value
   // reached through a "headers" map is treated as secret regardless of
   // length (even 1-5 characters), since arbitrary custom header names cannot
-  // be recognized by its generic token/key/secret/... name pattern.
-  secretValues.push(...collectConfigSecrets(Object.values(configs), process.env));
+  // be recognized by its generic token/key/secret/... name pattern. It stays
+  // inside the per-file try so a collector failure is contained per file.
+  for (const name of ['auth.json', 'models.json']) {
+    try { configs[name] = JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); secretValues.push(...collectConfigSecrets([configs[name]], process.env)); } catch {}
+  }
   secretValues.push(...collectHeaderSecrets(configs['models.json'], configs['auth.json'], process.env));
 };
 await refreshSecrets();
