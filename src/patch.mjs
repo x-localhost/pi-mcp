@@ -13,8 +13,11 @@ const modeNumber = octalText => parseInt(octalText, 8) & 0o777;
 // Strips any inherited GIT_* variable and layers on a fixed isolated
 // configuration, so a job's own repository state (config, attributes,
 // replace refs, hooks reachable only through a terminal prompt) can never
-// influence how this privileged generation step invokes git.
-function isolatedGitEnv(base) {
+// influence how this privileged generation step invokes git. Exported so
+// Manager.patch() can validate the target repository itself (repository())
+// under the same isolation, rather than the unfiltered child environment an
+// allowlisted GIT_DIR/GIT_WORK_TREE could otherwise redirect.
+export function isolatedGitEnv(base) {
   const env = {};
   for (const [key, value] of Object.entries(base)) if (!key.startsWith('GIT_')) env[key] = value;
   return { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ATTR_NOSYSTEM: '1',
@@ -116,26 +119,52 @@ export function pagePatch(bytes, offset, maxBytes) {
 // public path does not match the private checkpoint's raw path for the same
 // id was itself redacted; its path can never be trusted to look up the real
 // file at the base commit, so it is left out entirely.
-export async function stagePublicSide({ jobDir, manifest, checkpoint, stagingDir }) {
+//
+// A secret can be configured after the job's own export ran, so every public
+// blob is re-checked against the *current* sanitize policy here, before any
+// byte reaches git's binary (base85) encoding: text is sanitized again
+// (reason export_text_sanitized on change), and a binary blob still carrying
+// a secret is dropped from the candidate set entirely — on both sides, since
+// a dropped candidate never reaches completeAndRunDiff's base resolution
+// either — under secret_bearing_export_binary. Every path that will be
+// displayed in the patch metadata (a candidate's path and each omittedPaths
+// member) is independently re-sanitized too (path_sanitized on change); the
+// real (unsanitized) path is still used for every filesystem/git lookup, so
+// display sanitization can never corrupt staging or base resolution.
+export async function stagePublicSide({ jobDir, manifest, checkpoint, stagingDir, sanitize = defaultSanitize, env = process.env, secrets = [] }) {
   const checkpointPaths = new Map((checkpoint.entries || []).map(entry => [entry.id, entry.path]));
   await fs.mkdir(path.join(stagingDir, 'a'), { mode: 0o700 });
   await fs.mkdir(path.join(stagingDir, 'b'), { mode: 0o700 });
-  const omittedPaths = new Set();
-  for (const omission of manifest.omissions) if (omission.path) omittedPaths.add(omission.path);
-  const candidates = [];
   const reasons = new Set();
+  const displayPath = raw => {
+    const cleaned = sanitize(raw, env, secrets);
+    if (cleaned !== raw) reasons.add('path_sanitized');
+    return cleaned;
+  };
+  const omittedPaths = new Set();
+  for (const omission of manifest.omissions) if (omission.path) omittedPaths.add(displayPath(omission.path));
+  const candidates = [];
   for (const entry of manifest.entries) {
     if (entry.type !== 'file' && entry.type !== 'delete') continue;
-    if (entry.encoding === 'omitted') { omittedPaths.add(entry.path); continue; }
+    if (entry.encoding === 'omitted') { omittedPaths.add(displayPath(entry.path)); continue; }
     const rawPath = checkpointPaths.get(entry.id);
     if (rawPath === undefined || (entry.redacted && rawPath !== entry.path)) { reasons.add('redacted_path'); continue; }
     safeRelative(entry.path);
-    if (entry.type === 'delete') { candidates.push({ id: entry.id, path: entry.path, type: 'delete' }); continue; }
+    if (entry.type === 'delete') { candidates.push({ id: entry.id, path: entry.path, displayPath: displayPath(entry.path), type: 'delete' }); continue; }
     await safeLstat(jobDir, `artifacts/public/${entry.id}`);
-    const { bytes } = await readRegular(path.join(jobDir, 'artifacts', 'public', entry.id), 16 * 1024 * 1024);
-    if (bytes.length !== entry.size || sha(bytes) !== entry.sha256) throw new Error('Artifact integrity failure');
+    const { bytes: rawBytes } = await readRegular(path.join(jobDir, 'artifacts', 'public', entry.id), 16 * 1024 * 1024);
+    if (rawBytes.length !== entry.size || sha(rawBytes) !== entry.sha256) throw new Error('Artifact integrity failure');
+    const decoded = textBytes(rawBytes);
+    let bytes = rawBytes;
+    if (decoded !== null) {
+      const cleaned = sanitize(decoded, env, secrets);
+      if (cleaned !== decoded) { reasons.add('export_text_sanitized'); bytes = Buffer.from(cleaned, 'utf8'); }
+    } else {
+      const latin1 = rawBytes.toString('latin1'), utf8 = rawBytes.toString('utf8');
+      if (sanitize(latin1, env, secrets) !== latin1 || sanitize(utf8, env, secrets) !== utf8) { reasons.add('secret_bearing_export_binary'); continue; }
+    }
     await writeStagingFile(path.join(stagingDir, 'b'), entry.path, bytes, entry.mode);
-    candidates.push({ id: entry.id, path: entry.path, type: 'file', mode: entry.mode, bytes });
+    candidates.push({ id: entry.id, path: entry.path, displayPath: displayPath(entry.path), type: 'file', mode: entry.mode, bytes });
   }
   return { candidates, omittedPaths, reasons };
 }
@@ -145,7 +174,10 @@ export async function stagePublicSide({ jobDir, manifest, checkpoint, stagingDir
 // literal base commit tree, applies the base-side secret and size policy,
 // writes the a/ side, runs the single combined --no-index diff, and
 // sanitizes the final patch text once more before anything is returned.
-export async function completeAndRunDiff({ repository, baseCommit, candidates, stagingDir, bounds, sanitize = defaultSanitize, env = process.env, secrets = [] }) {
+// maxPatchBytes bounds the *sanitized* result: a `[redacted]` replacement can
+// only grow the text, so git's own maxBuffer (checked before sanitization)
+// cannot by itself keep the published patch under this bound.
+export async function completeAndRunDiff({ repository, baseCommit, candidates, stagingDir, bounds, sanitize = defaultSanitize, env = process.env, secrets = [], maxPatchBytes = 32 * 1024 * 1024 }) {
   const gitEnv = isolatedGitEnv(env);
   const reasons = new Set();
   let baseTotal = 0;
@@ -160,7 +192,7 @@ export async function completeAndRunDiff({ repository, baseCommit, candidates, s
     if (base.unsupported) { reasons.add('unsupported_base'); await dropStagedPublicSide(candidate); continue; }
     if (!base.exists) {
       if (candidate.type === 'delete') { reasons.add('unsupported_base'); continue; }
-      resolved.push({ path: candidate.path, change: 'added', binary: textBytes(candidate.bytes) === null });
+      resolved.push({ path: candidate.displayPath, change: 'added', binary: textBytes(candidate.bytes) === null });
       continue;
     }
     const size = await blobSize(repository, base.oid, gitEnv);
@@ -180,10 +212,10 @@ export async function completeAndRunDiff({ repository, baseCommit, candidates, s
     }
     const baseMode = modeNumber(base.mode);
     await writeStagingFile(path.join(stagingDir, 'a'), candidate.path, baseBytes, baseMode);
-    if (candidate.type === 'delete') { resolved.push({ path: candidate.path, change: 'deleted', binary: decoded === null }); continue; }
+    if (candidate.type === 'delete') { resolved.push({ path: candidate.displayPath, change: 'deleted', binary: decoded === null }); continue; }
     const sameContent = candidate.bytes.equals(baseBytes), sameMode = baseMode === candidate.mode;
     if (sameContent && sameMode) continue;
-    resolved.push({ path: candidate.path, change: sameContent ? 'mode' : 'modified', binary: decoded === null || textBytes(candidate.bytes) === null });
+    resolved.push({ path: candidate.displayPath, change: sameContent ? 'mode' : 'modified', binary: decoded === null || textBytes(candidate.bytes) === null });
   }
   const diffEnv = { ...gitEnv, GIT_CEILING_DIRECTORIES: path.dirname(stagingDir) };
   let bytes;
@@ -200,7 +232,16 @@ export async function completeAndRunDiff({ repository, baseCommit, candidates, s
     const cleaned = sanitize(decodedPatch, env, secrets);
     if (cleaned !== decodedPatch) reasons.add('patch_text_sanitized');
     bytes = Buffer.from(cleaned, 'utf8');
+  } else {
+    // A non-UTF-8 patch cannot be rewritten safely; its headers still carry
+    // raw paths, so fail closed if the binary probe finds any current secret.
+    const latin1 = bytes.toString('latin1'), utf8 = bytes.toString('utf8');
+    if (sanitize(latin1, env, secrets) !== latin1 || sanitize(utf8, env, secrets) !== utf8) throw new Error('Patch contains secret-bearing non-UTF-8 content');
   }
+  // Sanitization only ever grows the text (each match becomes `[redacted]`),
+  // so the bound must be re-checked here, after the final sanitize, rather
+  // than relying solely on git's own maxBuffer against the raw diff above.
+  if (bytes.length > maxPatchBytes) throw new Error('Patch exceeds bound');
   const sorted = resolved.sort((a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
   return { bytes, reasons, files: sorted };
 }
