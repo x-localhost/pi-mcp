@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pi": {
+      "command": "docker",
+      "args": ["compose", "-f", "${PI_INTERNAL_COMPOSE}", "-p", "${PI_INTERNAL_PROJECT}", "exec", "-T", "agent", "node", "/app/internal-agent/mcp.mjs"]
+    }
+  }
+}

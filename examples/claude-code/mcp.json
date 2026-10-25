@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pi": {
+      "command": "node",
+      "args": ["${PI_MCP_HOME}/src/server.mjs"],
+      "env": { "PI_MCP_CONFIG": "${PI_MCP_CONFIG}" }
+    }
+  }
+}

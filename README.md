@@ -1,5 +1,7 @@
 # Pi MCP
 
+[Claude Code에서 사용하기](docs/claude-code.md)
+
 [사내 전용 격리 Pi 에이전트 설정](docs/internal-agent.md)은 별도 opt-in Docker 프로필입니다.
 
 Pi MCP delegates bounded coding and review tasks to [Pi coding agent](https://github.com/earendil-works/pi) through a stdio MCP service. Each new task starts at a committed Git ref in its own branch and worktree. It returns a job ID immediately; queued and running work continues if the MCP client disconnects. Normal followups reuse the current unsealed session; long sessions can continue from preserved code in a fresh session. The completion APIs add events, interactive controls, verification, artifacts, forking, recovery and cleanup; see the [runtime guide](docs/completion-runtime.md) and [harness guide](docs/harness-runtime.md).
