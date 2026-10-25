@@ -1,17 +1,24 @@
 ## 현재 상태
 
-- 날짜: 2026-10-25 (Asia/Seoul). 사내 LLM의 빈 응답·비정상 응답 대응과 전체 소스 리뷰 결함 수정을 완료했음. 차단 사항 없음.
-- 반영 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main`. 통합 브랜치/worktree: `claude/llm-resilience/integration`, `/Users/leebw/workspace/claude/pi-mcp-worktrees/llm-resilience`. 시작 main `0fd464f`, 작업 최종 커밋 `3dee19a`(코드 최종 트리 `58e5f6a`).
-- worker 복구: Pi가 끝난 뒤 마지막 응답을 판정해 빈 응답·잘린 빈 응답·파싱 오류·재시도 소진 장애면 같은 세션에서 이어가기 프롬프트를 보냄. 기본 2회, 5초부터 지수 백오프, 설정 `providerRecovery`. 완료는 마지막 응답이 정상일 때만 인정. Pi 자체 자동 재시도도 명시적으로 켬. [사용법](docs/provider-resilience.md).
-- 사내 gateway: Pi에 한 바이트도 보내기 전이면 429/5xx·네트워크 오류·빈 스트림·깨진 JSON·내용 없는 응답을 최대 3회 재시도(지터 백오프, Retry-After 상한). 전송 시작 후 깨진 데이터는 연결을 끊어 Pi 재시도를 유도, 소진 시 503. 기본 켜짐, `retry.maxAttempts: 1`로 끔. [안내](docs/internal-agent.md).
-- 리뷰 결함 수정: dispatcher가 잠금 대기 오류로 조용히 죽던 문제, Pi stdin EPIPE 크래시, 신원 기록 전 종료 시 영구 격리, 아티팩트 export 종료 상태 누락, 보존 스캔 한도로 제출·health가 막히던 문제, 중지 시 Pi 즉시 강제 종료.
-- 검증(gram, `pi-mcp-llmres:base-20261025`, network none): 기준 main 384/384 → 최종 트리 전체 **467/467**. 실제 Pi 1.4.0이 모의 게이트웨이의 빈 응답 뒤 정상 응답으로 완료되는 테스트 포함. RED/GREEN·리드 수정 내역은 [결과](docs/llm-resilience-plan.md#results--2026-10-25).
-- 독립 리뷰: 네이티브 Fable reviewer 승인(차단 0), 비차단 6건 후속 반영. Codex bridge가 다른 세션 작업으로 계속 가득 차 Astra 설계 자문·검토는 실행하지 못했음.
-- 제한: 실제 사내 LLM 부하 상황은 측정하지 않음(모의만). gateway 재시도는 사내 전용 Docker 프로필에만 해당하고, 호스트 모드는 worker 복구와 Pi 자체 재시도로 대응.
-- 운영 메모: gram `/home`이 100% 차 있어 Docker 빌드 시 `DOCKER_CONFIG`를 /tmp로 지정해야 했음(정리하지 않음, 공유 자원). 원격 작업 디렉터리는 정리 완료.
-- 다음 단계: 실제 사내 환경에서 `providerRecovery`와 gateway `retry` 값을 관찰 후 조정. 필수 미완료 항목 없음.
+- 날짜: 2026-10-26 (Asia/Seoul). Claude Code에서 Pi MCP를 서브에이전트로 쓰기 위한 기능을 추가했음. 차단 사항 없음.
+- 반영 대상: `/Users/leebw/workspace/claude/pi-mcp`, `main` `5136593`(시작 `3da6b20`). 통합 브랜치 `claude/claude-code-kit/integration`(병합 후 삭제). 최종 소스 `4eb3974`.
+- `pi_wait`: 작업 1–8개를 한 번에 기다림(`until` any/all, 최대 300초, 기본 45초). 취소·진행 알림 지원, 작업별 요약과 다음 단계 힌트 반환.
+- `pi_patch`: 종료된 작업의 공개 산출물로 `git apply` 가능한 전체 패치(신규·삭제·바이너리·실행권한 포함)를 만들고 페이지로 반환. `include_text:false`로 메타데이터만 먼저 확인. 양쪽 내용·경로를 현재 비밀값 정책으로 다시 검사하고, 걸리면 해당 파일을 빼고 `applicable:false`. 사내 Docker 프로필은 `internal-agent/export-patch.mjs`로 반출.
+- 모든 MCP 응답을 압축 JSON으로 바꿔 토큰 절약. `pi_capabilities`에 `claudeCode` 한도 추가.
+- Claude Code 묶음: `examples/claude-code/`(`.mcp.json` 예시 2종, `pi-worker` 서브에이전트, `pi-delegation` 스킬), [한국어 안내](docs/claude-code.md). 사용자 `~/.claude`에는 설치하지 않았음(전역 설정 변경 금지).
+- 검증(gram, `pi-mcp-cck:base-20261026`, network none): 기준 467/467 → 최종 **517/517**. 단위별 RED/GREEN·3회 반복 안정성 확인. [결과](docs/claude-code-plan.md#results--2026-10-26).
+- 독립 리뷰: Astra 4회차 승인(차단 0). 1–3회차에서 비밀값 노출 경로(바이너리·8진 인용 파일명·auth/models 자격증명)와 크기 한도·취소·누락 집계를 지적받아 모두 수정.
+- 남은 한계: 실제 Claude Code 세션 구동, 실제 사내 LLM, 실제 compose 스택에서의 `export-patch.mjs`는 미검증. 활성 빌드 중 정리 경합 테스트는 스케줄링 의존(구조상 안전 근거는 결과 문서에 기록).
+- 운영 메모: gram `/home` 100% → Docker 빌드 시 `DOCKER_CONFIG=/tmp/...` 사용. `run-suite.sh`의 tar는 `--no-same-owner --no-overwrite-dir`가 필요(없으면 approved-mcp 테스트 2건 실패).
+- 다음 단계: 원하면 `examples/claude-code`의 에이전트·스킬을 사용 프로젝트의 `.claude/`(또는 `~/.claude/`)에 복사하고 `claude mcp add`로 서버 등록 후 실제 작업 1건으로 확인.
 
 ## 작업 기록
+
+### 2026-10-26 — Claude Code 서브에이전트 지원
+- `pi_wait`(다중 대기)·`pi_patch`(적용 가능한 전체 패치, 사내 반출 스크립트)·압축 JSON·Claude Code 에이전트/스킬/안내 추가.
+- Astra 리뷰 4회(3회 반려 후 승인)로 패치 비밀값 노출 경로 등 수정; 작업 `5136593`(소스 `4eb3974`).
+- 전체 517/517(gram), 단위 RED/GREEN·안정성 3회. 실제 Claude Code·사내 환경 구동은 미검증.
+- 원격 작업 자원 정리, live/global 설정·push·배포 변경 없음.
 
 ### 2026-10-25 — 사내 LLM 빈·비정상 응답 대응과 전체 소스 리뷰 수정
 - worker 이어가기 복구(`providerRecovery`)와 gateway 사전 검증·재시도 추가, 마지막 응답이 비어도 성공 처리되던 구멍 차단.
