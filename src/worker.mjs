@@ -31,6 +31,17 @@ const save = () => { const snapshot = structuredClone(job); saveChain = saveChai
 const now = () => new Date().toISOString();
 const sessionRoot = await fs.realpath(job.sessionDir);
 let child, rpc, stopping, finalText = '', settled = false, piActive = false, finalStopReason, providerError = '', stderrChunks = [], stderrBytes = 0, stderrOverflow = false;
+// lastPromptAt: set whenever a prompt (initial or continuation) is sent to
+// Pi, so the idle check below can tell a freshly-started run apart from one
+// whose only progress evidence predates a provider-recovery backoff (which
+// can itself be longer than idleTimeoutMs). recoveryWaiting: true only
+// while run() is inside the bounded backoff before a guaranteed-next
+// continuation prompt, so pumpControls() can accept a steer during that
+// specific window (Pi queues it regardless of run state; see
+// docs/provider-resilience.md) without doing so once the run has otherwise
+// settled for good (healthy or recovery-exhausted) and no further prompt
+// will ever be sent.
+let lastPromptAt = null, recoveryWaiting = false;
 let eventChain = Promise.resolve(), usageBaseline = null, stopPromise, lastAssistantMessage = null;
 const seenObservationIds = new Set();
 const secretValues = [];
@@ -319,6 +330,7 @@ async function run() {
     const settledPromise = rpc.waitFor('agent_settled', (job.timeoutSeconds + 10) * 1000);
     settledPromise.catch(() => {});
     piActive = true;
+    lastPromptAt = now();
     const prompt = await rpc.request('prompt', continuing
       ? { message: CONTINUATION_PROMPT }
       : { message: initialPromptMessage, ...(job.images?.length ? { images: job.images } : {}) });
@@ -340,8 +352,14 @@ async function run() {
     const delayMs = recoveryDelayMs(providerRecoveryPolicy, job.providerRecovery.attempts);
     await emitEvent({ type: 'provider_recovery', attempt: job.providerRecovery.attempts, reason: classification.reason, delayMs });
     const waitUntil = Date.now() + delayMs;
-    while (!stopping && Date.now() < waitUntil) await delay(Math.min(100, waitUntil - Date.now()));
+    recoveryWaiting = true;
+    // Also wake up promptly if Pi itself exits during the backoff, instead
+    // of always sleeping out the full (potentially long) delay before
+    // noticing the next prompt() call has nothing left to talk to.
+    while (!stopping && child.exitCode === null && child.signalCode === null && Date.now() < waitUntil) await delay(Math.min(100, waitUntil - Date.now()));
+    recoveryWaiting = false;
     if (stopping) break;
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error('Pi exited during provider recovery backoff');
   }
   if (!stopping && classification && !classification.healthy) {
     // Any unhealthy final message fails; a stop/end_turn reply that is neither
@@ -486,13 +504,20 @@ async function finalizeOnce() {
 }
 let pollingControls = false;
 async function pumpControls() {
-  if (pollingControls || !rpc || stopping || settled || job.status !== 'running') return;
+  // Normally skipped once settled (nothing left running to steer), but a
+  // provider-recovery backoff also leaves `settled` true from the previous
+  // run between attempts; allow it specifically then, since Pi's own
+  // session.steer()/agent.steer() unconditionally queue a steering message
+  // regardless of whether a turn is active, and the next prompt() call's
+  // initial steering poll drains that queue into the continuation's first
+  // turn (see docs/provider-resilience.md).
+  if (pollingControls || !rpc || stopping || (settled && !recoveryWaiting) || job.status !== 'running') return;
   pollingControls = true;
   const controls = path.join(dir, 'controls');
   try {
     const names = await fs.readdir(controls).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
     for (const name of names.filter(value => /^pending-[0-9a-f-]{36}\.json$/.test(value)).sort().slice(0, 8)) {
-      if (stopping || settled || job.status !== 'running') break;
+      if (stopping || (settled && !recoveryWaiting) || job.status !== 'running') break;
       const processing = name.replace('pending-', 'processing-');
       try { await fs.rename(path.join(controls, name), path.join(controls, processing)); }
       catch (error) { if (error.code === 'ENOENT') continue; throw error; }
@@ -573,7 +598,17 @@ async function consumeObservation() {
     if (policyStop.version !== 1 || !map[policyStop.reason]) throw new Error('Policy stop invalid');
     await stop(map[policyStop.reason]);
   }
-  if (piActive && !stopping && runtime.observation?.idleTimeoutMs > 0 && Date.now() - Date.parse(job.lastProgressAt || job.startedAt) > runtime.observation.idleTimeoutMs) await stop('idle_timeout');
+  if (piActive && !stopping && runtime.observation?.idleTimeoutMs > 0) {
+    // job.lastProgressAt/job.startedAt alone predate a provider-recovery
+    // backoff: if that backoff is itself longer than idleTimeoutMs, the
+    // instant piActive becomes true again for the continuation prompt the
+    // elapsed time already exceeds the idle budget, stopping the job as
+    // idle_timeout before Pi has had any chance to answer. lastPromptAt is
+    // refreshed every time a prompt (initial or continuation) is sent, so
+    // taking the max here resets the idle clock to that send time.
+    const idleBaseline = Math.max(Date.parse(job.lastProgressAt || job.startedAt), lastPromptAt ? Date.parse(lastPromptAt) : -Infinity);
+    if (Date.now() - idleBaseline > runtime.observation.idleTimeoutMs) await stop('idle_timeout');
+  }
   if (piActive && !stopping && runtime.observation?.consecutiveFailureLimit > 0 && job.observation?.consecutiveToolFailures >= runtime.observation.consecutiveFailureLimit) await stop('tool_failure_limit');
 }
 let watchdogClosing = false, watchdogActive = null;

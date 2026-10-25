@@ -161,7 +161,7 @@ test('capabilities exposes providerRecovery version and configured values', () =
 // worker-level recovery behavior (fake Pi)
 // =======================================================================
 
-async function setupWorker(t, providerRecovery) {
+async function setupWorker(t, providerRecovery, extra = {}) {
   const tmp = await makeTempDir('pi-provrec-worker-');
   t.after(() => fs.rm(tmp, { recursive: true, force: true }));
   const repository = path.join(tmp, 'repo'); await fs.mkdir(repository);
@@ -170,7 +170,7 @@ async function setupWorker(t, providerRecovery) {
   await fs.writeFile(path.join(repository, 'base.txt'), 'base'); git('add', '.'); git('commit', '-qm', 'base');
   await fs.chmod(fake, 0o755);
   const manager = await new Manager({ stateDir: path.join(tmp, 'state'), allowedRoots: [tmp], maxConcurrent: 2, defaultTimeoutSeconds: 15, maxTimeoutSeconds: 30, defaultMaxTurns: 5,
-    piPath: fake, allowedCommands: [], providerRecovery }, { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8' }).init();
+    piPath: fake, allowedCommands: [], providerRecovery, ...extra }, { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8' }).init();
   const input = { repository, title: 'Provider recovery', prompt: 'Use fake Pi', provider: 'mock', model: 'mock' };
   return { manager, input };
 }
@@ -237,6 +237,47 @@ test('plain success still completes with providerRecovery.attempts 0, and set_au
   assert.equal(status.status, 'completed', JSON.stringify(status));
   assert.equal(status.providerRecovery.attempts, 0);
   assert.equal(await fs.access(path.join(manager.jobDir(started.id), 'auto-retry-received.json')).then(() => true, () => false), true);
+});
+
+// =======================================================================
+// worker review fixes: idle timeout, Pi exit, and steering during the
+// provider-recovery backoff
+// =======================================================================
+
+test('a recovery backoff longer than idleTimeoutMs does not spuriously stop the job as idle_timeout', { timeout: 20000 }, async t => {
+  // baseDelayMs (2500ms) is longer than idleTimeoutMs (1500ms), so a stale
+  // idle baseline (job.lastProgressAt/startedAt from before the backoff)
+  // would already exceed idleTimeoutMs the instant the continuation prompt
+  // is sent. The continuation itself settles slowly (1200ms, comfortably
+  // under idleTimeoutMs) so a watchdog tick (every 500ms) reliably lands
+  // while piActive is true, giving the stale-baseline bug a real chance to
+  // fire before this asserts completed, not idle_timeout.
+  const { manager, input } = await setupWorker(t, { maxAttempts: 1, baseDelayMs: 2500, maxDelayMs: 2500 }, { observation: { idleTimeoutMs: 1500 } });
+  const started = await manager.start({ ...input, prompt: '[FAKE_RECOVER_ONCE_SLOW_SETTLE] do the task' });
+  const status = await finished(manager, started.id);
+  assert.equal(status.status, 'completed', JSON.stringify(status));
+  assert.match((await manager.result(started.id)).result, /Recovered answer/);
+  assert.equal(status.providerRecovery.attempts, 1);
+});
+
+test('Pi exiting during the recovery backoff fails promptly instead of waiting out the full delay', { timeout: 20000 }, async t => {
+  const { manager, input } = await setupWorker(t, { maxAttempts: 2, baseDelayMs: 15000, maxDelayMs: 15000 });
+  const startedAt = Date.now();
+  const started = await manager.start({ ...input, prompt: '[FAKE_EXIT_DURING_BACKOFF] do the task' });
+  const status = await finished(manager, started.id, 100);
+  const elapsed = Date.now() - startedAt;
+  assert.equal(status.status, 'failed', JSON.stringify(status));
+  assert.ok(elapsed < 5000, `expected prompt failure well before the 15s backoff, took ${elapsed}ms`);
+});
+
+test('a steer sent during the recovery backoff is delivered to Pi (queued_by_pi), not left as unknown', { timeout: 20000 }, async t => {
+  const { manager, input } = await setupWorker(t, { maxAttempts: 1, baseDelayMs: 4000, maxDelayMs: 4000 });
+  const started = await manager.start({ ...input, prompt: '[FAKE_RECOVER_ONCE] do the task' });
+  for (let i = 0; i < 80; i++) { const current = await manager.status(started.id); if (current.providerRecovery?.attempts >= 1) break; await delay(100); }
+  const ack = await manager.steer(started.id, { message: 'steer during backoff' });
+  assert.equal(ack.status, 'queued_by_pi', JSON.stringify(ack));
+  const status = await finished(manager, started.id);
+  assert.equal(status.status, 'completed', JSON.stringify(status));
 });
 
 // =======================================================================

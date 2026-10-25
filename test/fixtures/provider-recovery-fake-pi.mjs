@@ -34,12 +34,15 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     if (request.enabled === true) await fs.writeFile(path.join(path.dirname(policy.readyFile), 'auto-retry-received.json'), JSON.stringify({ enabled: true }));
     send({ type: 'response', id: request.id, command: request.type, success: true });
   }
+  else if (request.type === 'steer') send({ type: 'response', id: request.id, command: request.type, success: true, data: { disposition: 'queued' } });
   else if (['set_thinking_level', 'clear_queue'].includes(request.type)) send({ type: 'response', id: request.id, command: request.type, success: true });
   else if (request.type === 'abort') { send({ type: 'response', id: request.id, command: request.type, success: true }); process.exit(0); }
   else if (request.type === 'prompt') {
     promptCount++;
     if (!scenario) {
-      scenario = request.message.includes('[FAKE_RECOVER_ONCE]') ? 'recover_once'
+      scenario = request.message.includes('[FAKE_RECOVER_ONCE_SLOW_SETTLE]') ? 'recover_once_slow'
+        : request.message.includes('[FAKE_EXIT_DURING_BACKOFF]') ? 'exit_during_backoff'
+        : request.message.includes('[FAKE_RECOVER_ONCE]') ? 'recover_once'
         : request.message.includes('[FAKE_EARLY_TEXT_THEN_EMPTY]') ? 'early_text_then_empty'
         : request.message.includes('[FAKE_ALWAYS_EMPTY]') ? 'always_empty'
         : request.message.includes('[FAKE_AUTH_ERROR]') ? 'auth_error'
@@ -47,9 +50,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     send({ type: 'response', id: request.id, command: 'prompt', success: true, data: { disposition: 'started' } });
     send({ type: 'turn_start' });
-    if (scenario === 'recover_once') {
+    if (scenario === 'recover_once' || scenario === 'recover_once_slow') {
       if (promptCount === 1) send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
       else send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Recovered answer' }], usage: { input: 1, output: 2 } } });
+    } else if (scenario === 'exit_during_backoff') {
+      send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
     } else if (scenario === 'early_text_then_empty') {
       send({ type: 'message_end', message: { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'text', text: 'Earlier progress' }, { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'base.txt' } }], usage: { input: 1, output: 2 } } });
       send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
@@ -61,6 +66,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Fake completed' }], usage: { input: 1, output: 2 } } });
     }
     send({ type: 'agent_end' });
-    setTimeout(() => send({ type: 'agent_settled' }), 50);
+    if (scenario === 'exit_during_backoff' && promptCount === 1) {
+      // Settle normally (empty, recoverable), then simulate Pi crashing
+      // partway through the worker's recovery backoff.
+      setTimeout(() => { send({ type: 'agent_settled' }); setTimeout(() => process.exit(1), 250); }, 50);
+    } else if (scenario === 'recover_once_slow' && promptCount === 2) {
+      // Settle the continuation slowly enough that at least one 500ms
+      // watchdog tick lands while piActive is true after it was sent, so a
+      // stale idle baseline (one that ignores the backoff just taken) would
+      // reliably be caught stopping the job as idle_timeout.
+      setTimeout(() => send({ type: 'agent_settled' }), 1200);
+    } else {
+      setTimeout(() => send({ type: 'agent_settled' }), 50);
+    }
   }
 }

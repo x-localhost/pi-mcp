@@ -344,6 +344,9 @@ function sseChunkIsMeaningful(parsed) {
   if (typeof delta.content === 'string' && delta.content !== '') return true;
   if (typeof delta.reasoning_content === 'string' && delta.reasoning_content !== '') return true;
   if (typeof delta.reasoning === 'string' && delta.reasoning !== '') return true;
+  // A non-empty refusal is a genuine (if unwelcome) answer from the model,
+  // not an empty/malformed reply; forward it instead of retrying it away.
+  if (typeof delta.refusal === 'string' && delta.refusal !== '') return true;
   if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
   return false;
 }
@@ -359,6 +362,9 @@ function nonStreamJsonIsValid(parsed) {
   const message = choice.message;
   if (object(message)) {
     if (typeof message.content === 'string' && message.content !== '') return true;
+    // Same reasoning as sseChunkIsMeaningful's refusal check: a non-empty
+    // refusal is a real upstream answer, not an empty/malformed one.
+    if (typeof message.refusal === 'string' && message.refusal !== '') return true;
     if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true;
   }
   return false;
@@ -620,6 +626,14 @@ function handleChatWithRetry(req, res, config, requestImpl, release, consumeRate
             pendingFlush = new Promise(resolve => res.write(outbound, () => { pendingFlush = null; resolve(); }));
           }
           if (cutRequested) cut();
+          // `pending` holds only the trailing, still-incomplete line (every
+          // complete one was just sliced off above into bufferedParts or
+          // outboundParts); the per-line MAX_SSE_BUFFER checks above only
+          // ever look at *complete* lines, so nothing bounds a single line
+          // that keeps arriving without a newline. Apply the same 1 MiB
+          // bound to it directly: pre-commit, treat it as malformed (retry);
+          // post-commit, cut the connection instead of buffering forever.
+          else if (pending.length > MAX_SSE_BUFFER) { if (committedThisAttempt) cut(); else giveUp('malformed', MALFORMED_TEXT); }
         });
         reply.on('end', () => {
           if (settled) return;
