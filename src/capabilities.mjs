@@ -13,6 +13,7 @@ export function capabilities(config) {
     continuations: ['pi_followup', 'pi_fork', 'pi_rollover', 'pi_review'],
     acceptance: { version: 1, fields: ['required_verification_ids', 'required_artifact_paths', 'require_review'], reviewAttestationAuthority: 'caller' },
     context: { version: 1, ...(config.context || {}) }, observation: { version: 1, ...(config.observation || {}) },
+    providerRecovery: { version: 1, ...(config.providerRecovery || {}) },
     limits: { maxConcurrent: config.maxConcurrent, maxTimeoutSeconds: config.maxTimeoutSeconds, defaultMaxTurns: config.defaultMaxTurns,
       maxSelectedVerifiers: config.verification?.maxSelected, maxMaterials: 32, maxInlineImages: 4 }
   };

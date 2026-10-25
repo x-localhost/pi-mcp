@@ -24,7 +24,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     send({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'steering complete' }], usage: { input: 1, output: 1 } } });
     send({ type: 'agent_settled' });
   }
-  else if (request.type === 'clear_queue' || request.type === 'set_thinking_level') send({ type: 'response', id: request.id, command: request.type, success: true });
+  else if (request.type === 'clear_queue' || request.type === 'set_thinking_level' || request.type === 'set_auto_retry') send({ type: 'response', id: request.id, command: request.type, success: true });
   else if (request.type === 'prompt') {
     send({ type: 'response', id: request.id, command: request.type, success: true, data: { disposition: 'started' } });
     if (policy.mode !== 'review') await fs.writeFile(path.join(policy.worktree, 'code.txt'), 'retained code\n');

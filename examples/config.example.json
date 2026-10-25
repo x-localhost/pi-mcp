@@ -18,5 +18,10 @@
     "noProxyEnv": "CORP_NO_PROXY",
     "caFile": "/etc/ssl/certs/company-root-ca.pem",
     "npmRegistry": "https://npm.example.invalid/"
+  },
+  "providerRecovery": {
+    "maxAttempts": 2,
+    "baseDelayMs": 5000,
+    "maxDelayMs": 60000
   }
 }

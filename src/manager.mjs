@@ -21,6 +21,10 @@ import { readWorkflowReferences } from './workflow.mjs';
 const exec = promisify(execFile);
 const codeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const active = new Set(['starting', 'running', 'finalizing', 'quarantined']);
+// Mirrors src/config.mjs normalizeProviderRecovery()'s defaults, for raw
+// config objects (tests, or any caller bypassing loadConfig) that omit the
+// optional providerRecovery section entirely.
+const DEFAULT_PROVIDER_RECOVERY = Object.freeze({ maxAttempts: 2, baseDelayMs: 5000, maxDelayMs: 60000 });
 const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'turn_limit', 'interrupted', 'queue_expired', 'budget_limit', 'budget_unavailable', 'context_limit', 'idle_timeout', 'tool_failure_limit']);
 const idPattern = /^task-[0-9a-f-]{36}$/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -110,7 +114,8 @@ export class Manager {
     const verifierIds = job.verificationIds || [];
     const verification = verifierIds.map(id => this.config.verification?.commands?.find(item => item.id === id));
     return { allowedCommands: this.config.allowedCommands || [], approvedMcp: this.config.approvedMcp || { servers: [] }, materials, verification,
-      artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, context: this.config.context || {}, observation: this.config.observation || {}, mode: job.mode, provider: job.provider, model: job.model,
+      artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, context: this.config.context || {}, observation: this.config.observation || {},
+      providerRecovery: this.config.providerRecovery || DEFAULT_PROVIDER_RECOVERY, mode: job.mode, provider: job.provider, model: job.model,
       allowedRoots: this.config.allowedRoots, piPath: this.config.piPath, piArgs: this.config.piArgs || [], envAllowlist: this.config.envAllowlist || [],
       network: this.config.network || {}, agentDir: this.config.agentDir || null, modelsFile: this.config.modelsFile || null, authFile: this.config.authFile || null };
   }
@@ -126,6 +131,7 @@ export class Manager {
       configFile: this.config.configFile || process.env.PI_MCP_CONFIG || null,
       verification: this.config.verification || { commands: [] }, artifacts: this.config.artifacts || {}, budgets: this.config.budgets || {}, approvedMcp: this.config.approvedMcp || { servers: [] },
       context: this.config.context || {}, observation: this.config.observation || {},
+      providerRecovery: this.config.providerRecovery || DEFAULT_PROVIDER_RECOVERY,
       traceInternalGateway });
     if (this.spawnWorker) {
       const child = spawn(process.execPath, [path.join(codeRoot, 'src', 'worker.mjs'), dir], {
@@ -223,7 +229,7 @@ export class Manager {
     return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async public(job) {
-    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'usageAvailability', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'acceptance', 'acceptanceContract', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget'];
+    const keys = ['id', 'title', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'lastProgress', 'error', 'warning', 'exitCode', 'numTurns', 'usage', 'usageAvailability', 'permissionDenials', 'permissionDenialsTruncated', 'diffStat', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'execution', 'verification', 'acceptance', 'acceptanceContract', 'artifacts', 'inputMaterialsDigest', 'inputSnapshotDigest', 'sessionCheckpoint', 'budget', 'providerRecovery'];
     const trusted = new Set(['id', 'status', 'repository', 'worktree', 'branch', 'baseCommit', 'parentJobId', 'forkJobId', 'rolloverFromId', 'rolloverSourceSnapshotDigest', 'reviewSourceJobId', 'reviewSourceSnapshotDigest', 'reviewSourceContractDigest', 'createdAt', 'queueExpiresAt', 'admittedAt', 'startedAt', 'finishedAt', 'heartbeatAt', 'lastProgressAt', 'observation', 'sessionFile', 'sessionId', 'effectiveModel', 'exitCode', 'numTurns', 'usage', 'usageAvailability', 'permissionDenialsTruncated', 'diffPreviewTruncated', 'resultOmitted', 'stderrTruncated', 'changedFiles', 'inputMaterialsDigest', 'inputSnapshotDigest', 'acceptance', 'acceptanceContract']);
     const secrets = await this.headerSecretValues();
     const clean = value => sanitize(value, this.childEnv, secrets);
