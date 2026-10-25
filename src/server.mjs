@@ -100,6 +100,11 @@ server.registerTool('pi_read_artifact', {
   description: 'Read exact public artifact bytes in bounded base64 pages with hashes.',
   inputSchema: { job_id: id, artifact_id: z.string().regex(/^a\d{6}$/), offset: z.number().int().min(0).default(0), length: z.number().int().min(1).max(config.artifacts.maxReadBytes).default(Math.min(65536, config.artifacts.maxReadBytes)) }, annotations: { readOnlyHint: true, openWorldHint: false }
 }, wrap(({ job_id, ...options }) => manager.readArtifact(job_id, options)));
+server.registerTool('pi_patch', {
+  description: 'Build and page a sanitized unified diff of the exported changes for a terminal job, relative to its base commit; caches on disk.',
+  inputSchema: { job_id: id, offset: z.number().int().min(0).default(0), max_bytes: z.number().int().min(4096).max(262144).default(65536), include_text: z.boolean().default(true) },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+}, wrap(({ job_id, ...options }) => manager.patch(job_id, options)));
 server.registerTool('pi_recover', {
   description: 'Inspect a quarantined job; explicitly terminate only groups with verified Linux ownership.',
   inputSchema: { job_id: id, terminate: z.boolean().default(false) }, annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }

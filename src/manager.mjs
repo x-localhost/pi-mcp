@@ -13,7 +13,8 @@ import { applyOfflineMaterials } from './offline-materials.mjs';
 import { identityState, groupState, stopOwnedGroup, processIdentity } from './ownership.mjs';
 import { scanState } from './storage.mjs';
 import { normalizeImages } from './images.mjs';
-import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts } from './artifacts.mjs';
+import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts, manifestAt, readCheckpoint, validateArtifactConfig, textBytes, safeLstat, readRegular } from './artifacts.mjs';
+import { stagePublicSide, completeAndRunDiff, patchKey, sanitizeConfigDigest, pagePatch } from './patch.mjs';
 import { normalizeAcceptance, inheritAcceptance, evaluateAcceptance, contractDigest } from './acceptance.mjs';
 import { buildHandoff, extendAuthoritativeInstructions, shouldAutoRollover } from './session-transition.mjs';
 import { readWorkflowReferences } from './workflow.mjs';
@@ -736,11 +737,119 @@ export class Manager {
       return { ...job, result: result.text, resultPreviewTruncated: result.truncated || !!job.resultOmitted,
         stderrTail: stderr.text, stderrPreviewTruncated: stderr.truncated || !!job.stderrTruncated,
         diffPreview: diff.text, diffPreviewTruncated: diff.truncated || !!job.diffPreviewTruncated, artifactsDir: dir,
-        untrackedNote: 'Patch contains tracked changes only; inspect artifacts for new files.' };
+        untrackedNote: 'Patch contains tracked changes only; use pi_patch for a complete sanitized change set including new and deleted files.' };
     });
   }
   async artifacts(id, options = {}) { return this.lock(async () => { const job = await this.read(id); if (!terminal.has(job.status)) throw new Error('Artifacts require a terminal job'); return listArtifacts(this.jobDir(id), options); }); }
   async readArtifact(id, options = {}) { return this.lock(async () => { const job = await this.read(id); if (!terminal.has(job.status)) throw new Error('Artifacts require a terminal job'); return readArtifact(this.jobDir(id), options); }); }
+  // Builds (or reuses a cached) sanitized unified diff of a terminal job's
+  // exported public changes against its literal baseCommit tree, and returns
+  // one bounded page of it. Phase 1 (candidate selection and copying public
+  // bytes into a fresh staging directory) runs under the submission lock, so
+  // it cannot race pi_cleanup of the same job. Phase 2 (resolving base
+  // content from the repository and running the single combined diff) runs
+  // unlocked, so a slow repository never blocks other submissions. Publish
+  // re-validates under the lock and never recreates a removed job directory.
+  async patch(id, { offset = 0, max_bytes = 65536, include_text = true } = {}) {
+    assertId(id);
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid offset');
+    if (!Number.isSafeInteger(max_bytes) || max_bytes < 4096 || max_bytes > 262144) throw new Error('Invalid max_bytes');
+    const generator = 1;
+    const secrets = await this.headerSecretValues();
+    // sanitize() masks header secrets and secret-named child env values; the
+    // cache key must change whenever either set does.
+    const envSecrets = Object.entries(this.childEnv).filter(([name, value]) => /(?:token|key|secret|password|proxy|auth|credential)/i.test(name) && typeof value === 'string').map(([name, value]) => `${name}=${value}`);
+    const sanitizeDigest = sanitizeConfigDigest([...secrets, ...envSecrets]);
+    const stagingRoot = path.join(this.config.stateDir, 'patch-staging');
+    await fs.mkdir(stagingRoot, { recursive: true, mode: 0o700 });
+    const stale = await fs.readdir(stagingRoot).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
+    for (const name of stale) {
+      if (!/^patch-[0-9a-f-]{36}$/.test(name)) continue;
+      const stat = await fs.lstat(path.join(stagingRoot, name)).catch(() => null);
+      if (stat?.isDirectory() && Date.now() - stat.mtimeMs > 3600000) await fs.rm(path.join(stagingRoot, name), { recursive: true, force: true });
+    }
+    const readCached = async (jobDir, key) => {
+      const dir = path.join(jobDir, 'patch');
+      try {
+        await safeLstat(jobDir, 'patch/patch.json');
+        const descriptor = JSON.parse((await readRegular(path.join(dir, 'patch.json'), 1024 * 1024)).bytes);
+        if (descriptor.key !== key) return null;
+        await safeLstat(jobDir, `patch/changes-${descriptor.key}.patch`);
+        const { bytes } = await readRegular(path.join(dir, `changes-${descriptor.key}.patch`), 33 * 1024 * 1024);
+        if (bytes.length !== descriptor.totalBytes || sha(bytes) !== descriptor.sha256) return null;
+        await safeLstat(jobDir, `patch/meta-${descriptor.key}.json`);
+        const meta = JSON.parse((await readRegular(path.join(dir, `meta-${descriptor.key}.json`), 1024 * 1024)).bytes);
+        if (JSON.stringify(meta) !== JSON.stringify(descriptor)) return null;
+        return { descriptor, bytes };
+      } catch { return null; }
+    };
+    const prepared = await this.lock(async () => {
+      const job = await this.read(id).catch(() => { throw new Error('Job not found'); });
+      if (job.status === 'quarantined') throw new Error('Quarantined job cannot be patched');
+      if (!terminal.has(job.status)) throw new Error('Patch requires a terminal job');
+      const jobDir = this.jobDir(id);
+      const manifest = await manifestAt(jobDir);
+      if (manifest.manifestSha256 !== job.artifacts?.manifestSha256) throw new Error('Artifact manifest does not match job');
+      if (manifest.sourceBaselineCommit !== job.baseCommit) throw new Error('Artifact manifest base mismatch');
+      const repository = await this.repository(job.repository);
+      const key = patchKey({ generator, baseCommit: job.baseCommit, manifestSha256: manifest.manifestSha256, sanitizeDigest });
+      const cached = await readCached(jobDir, key);
+      if (cached) return { cached, jobDir };
+      const checkpoint = await readCheckpoint(jobDir);
+      const stagingDir = path.join(stagingRoot, `patch-${randomUUID()}`);
+      await fs.mkdir(stagingDir, { mode: 0o700 });
+      const { candidates, omittedPaths, reasons } = await stagePublicSide({ jobDir, manifest, checkpoint, stagingDir })
+        .catch(async error => { await fs.rm(stagingDir, { recursive: true, force: true }); throw error; });
+      return { jobDir, repository, baseCommit: job.baseCommit, manifest, stagingDir, candidates, omittedPaths, reasons, key };
+    });
+    if (prepared.cached) return this.patchPage(id, prepared.jobDir, prepared.cached.descriptor, prepared.cached.bytes, offset, max_bytes, include_text);
+    const { jobDir, repository, baseCommit, manifest, stagingDir, candidates, omittedPaths, reasons, key } = prepared;
+    const bounds = validateArtifactConfig(this.config.artifacts);
+    let result;
+    try { result = await completeAndRunDiff({ repository, baseCommit, candidates, stagingDir, bounds, sanitize, env: this.childEnv, secrets }); }
+    finally { await fs.rm(stagingDir, { recursive: true, force: true }); }
+    const allReasons = new Set([...reasons, ...result.reasons]);
+    if (!manifest.exportComplete) allReasons.add('export_incomplete');
+    const descriptor = { version: 1, generator, key, manifestSha256: manifest.manifestSha256, baseCommit, sha256: sha(result.bytes),
+      totalBytes: result.bytes.length, encoding: textBytes(result.bytes) === null ? 'base64' : 'utf8', applicable: allReasons.size === 0,
+      notApplicableReasons: [...allReasons].sort(), files: result.files.slice(0, 256), filesTruncated: result.files.length > 256,
+      omittedPaths: [...omittedPaths], inputSnapshotDigest: manifest.inputSnapshotDigest, inputMaterialsDigest: manifest.inputMaterialsDigest };
+    const published = await this.lock(async () => {
+      await this.read(id).catch(() => { throw new Error('Job not found'); });
+      const latest = await manifestAt(jobDir).catch(() => null);
+      if (!latest || latest.manifestSha256 !== manifest.manifestSha256) throw new Error('Artifact manifest changed; retry pi_patch');
+      const dir = path.join(jobDir, 'patch');
+      await fs.mkdir(dir, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+      // Always overwrite atomically (temp + rename) rather than exclusive-create:
+      // the bytes are deterministic from (generator, baseCommit, manifestSha256,
+      // sanitizeDigest), so a concurrent builder for the same key produces the
+      // same content, and a tampered file on disk is simply repaired rather than
+      // reported as a spurious collision.
+      const writeAtomic = async (file, bytes) => {
+        const temp = `${file}.${randomUUID()}.tmp`;
+        await fs.writeFile(temp, bytes, { mode: 0o600 });
+        await fs.rename(temp, file);
+      };
+      await writeAtomic(path.join(dir, `changes-${key}.patch`), result.bytes);
+      await writeAtomic(path.join(dir, `meta-${key}.json`), Buffer.from(JSON.stringify(descriptor) + '\n'));
+      await atomicJson(path.join(dir, 'patch.json'), descriptor);
+      return descriptor;
+    });
+    return this.patchPage(id, jobDir, published, result.bytes, offset, max_bytes, include_text);
+  }
+  // Implementation detail of patch(): turns a cached/freshly-built descriptor
+  // plus its full bytes into one bounded output page.
+  patchPage(jobId, jobDir, descriptor, bytes, offset, maxBytes, includeText) {
+    const page = pagePatch(bytes, offset, maxBytes);
+    const base = { job_id: jobId, baseCommit: descriptor.baseCommit, applicable: descriptor.applicable,
+      applicableMeaning: 'complete, unredacted patch of supported exported source changes relative to baseCommit; not proof of target compatibility, verification, acceptance or review',
+      notApplicableReasons: descriptor.notApplicableReasons, totalBytes: descriptor.totalBytes, sha256: descriptor.sha256,
+      encoding: page.encoding, offset, nextOffset: page.nextOffset, eof: page.eof, files: descriptor.files, filesTruncated: descriptor.filesTruncated,
+      omittedPaths: descriptor.omittedPaths, inputSnapshotDigest: descriptor.inputSnapshotDigest, inputMaterialsDigest: descriptor.inputMaterialsDigest,
+      patchFile: path.join(jobDir, 'patch', `changes-${descriptor.key}.patch`),
+      patchFileNote: 'server path; not visible from the host in the internal Docker profile; save and verify sha256 before pi_cleanup' };
+    return includeText ? { ...base, text: page.text } : base;
+  }
   async fork(id, input) {
     if (!this.config.queue) throw new Error('Fork requires queued runtime configuration');
     return this.start(input, null, { forkFromId: id });

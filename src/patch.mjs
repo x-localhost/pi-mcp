@@ -1,0 +1,206 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { sanitize as defaultSanitize } from './sanitize.mjs';
+import { safeRelative, safeLstat, readRegular, textBytes } from './artifacts.mjs';
+
+const exec = promisify(execFile);
+const sha = value => createHash('sha256').update(value).digest('hex');
+const modeNumber = octalText => parseInt(octalText, 8) & 0o777;
+
+// Strips any inherited GIT_* variable and layers on a fixed isolated
+// configuration, so a job's own repository state (config, attributes,
+// replace refs, hooks reachable only through a terminal prompt) can never
+// influence how this privileged generation step invokes git.
+function isolatedGitEnv(base) {
+  const env = {};
+  for (const [key, value] of Object.entries(base)) if (!key.startsWith('GIT_')) env[key] = value;
+  return { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ATTR_NOSYSTEM: '1',
+    GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
+}
+async function runGit(args, { cwd, env, maxBuffer = 8 * 1024 * 1024 }) {
+  try {
+    const { stdout } = await exec('git', args, { cwd, env, timeout: 30000, maxBuffer, encoding: 'buffer' });
+    return stdout;
+  } catch (error) {
+    const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr || '');
+    throw new Error(`git ${args[2] || args[0]} failed: ${stderr.slice(0, 2000) || error.message}`);
+  }
+}
+// Resolves exactly one literal path at the given base commit. Returns null
+// when there is no tree entry there at all; the ancestor walk in
+// resolveBaseFile() is what distinguishes "truly absent" from "hidden behind
+// a non-tree ancestor", which ls-tree alone cannot tell apart (both yield no
+// output for a deep pathspec).
+async function lsTreeEntry(repository, baseCommit, relPath, env) {
+  const stdout = await runGit(['-C', repository, 'ls-tree', '-z', '--full-tree', baseCommit, '--', relPath],
+    { env: { ...env, GIT_LITERAL_PATHSPECS: '1' }, maxBuffer: 1024 * 1024 });
+  const line = stdout.toString('utf8').split('\0').filter(Boolean)[0];
+  if (!line) return null;
+  const tab = line.indexOf('\t');
+  const [mode, type, oid] = line.slice(0, tab).split(' ');
+  return { mode, type, oid };
+}
+// Walks every ancestor of relPath, confirming each is a tree, before
+// resolving the leaf. A symlink or gitlink anywhere on the path blocks git
+// from seeing what is nominally "under" it; without this explicit walk that
+// is indistinguishable from the path simply not existing, which would let an
+// unsafe ancestor silently fall through as an ordinary "added" file instead
+// of being refused.
+async function resolveBaseFile(repository, baseCommit, relPath, env) {
+  const segments = relPath.split('/');
+  for (let i = 1; i < segments.length; i++) {
+    const entry = await lsTreeEntry(repository, baseCommit, segments.slice(0, i).join('/'), env);
+    if (!entry) return { exists: false };
+    if (entry.type !== 'tree') return { exists: true, unsupported: true };
+  }
+  const leaf = await lsTreeEntry(repository, baseCommit, relPath, env);
+  if (!leaf) return { exists: false };
+  if (leaf.type !== 'blob' || !['100644', '100755'].includes(leaf.mode)) return { exists: true, unsupported: true };
+  return { exists: true, mode: leaf.mode, oid: leaf.oid };
+}
+async function blobSize(repository, oid, env) {
+  return Number((await runGit(['-C', repository, 'cat-file', '-s', oid], { env, maxBuffer: 64 })).toString('utf8').trim());
+}
+async function writeStagingFile(root, relPath, bytes, mode) {
+  const target = path.join(root, relPath);
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await fs.writeFile(target, bytes, { flag: 'wx' });
+  await fs.chmod(target, mode);
+}
+
+// Folds a set of secret values into a digest of their own hashes, so the
+// cache key can depend on "which secrets apply right now" without the key
+// (or anything derived from it) ever holding the secret values themselves.
+export function sanitizeConfigDigest(secrets) {
+  return sha(JSON.stringify([...new Set(secrets)].map(sha).sort()));
+}
+export function patchKey({ generator, baseCommit, manifestSha256, sanitizeDigest }) {
+  return sha(`${generator}:${baseCommit}:${manifestSha256}:${sanitizeDigest}`);
+}
+
+// Pure pagination over an already-generated, already-sanitized patch buffer.
+// With valid UTF-8 (no NUL bytes) text content, a page ends at the last
+// newline within maxBytes, falling back to a UTF-8 character boundary for a
+// single overlong line; joining pages reproduces the exact text. Otherwise
+// pages are raw byte ranges whose `text` field holds base64, decoded and
+// joined by the caller. An offset beyond the end, or (for text) one that
+// does not fall on a UTF-8 character boundary, is refused.
+export function pagePatch(bytes, offset, maxBytes) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > bytes.length) throw new Error('Invalid patch offset');
+  const decoded = textBytes(bytes);
+  if (decoded === null) {
+    const slice = bytes.subarray(offset, offset + maxBytes);
+    const nextOffset = offset + slice.length;
+    return { encoding: 'base64', text: slice.toString('base64'), nextOffset, eof: nextOffset === bytes.length };
+  }
+  if (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80) throw new Error('Invalid patch offset: not on a character boundary');
+  let end = Math.min(offset + maxBytes, bytes.length);
+  if (end < bytes.length) {
+    const newline = bytes.lastIndexOf(10, end - 1);
+    if (newline >= offset) end = newline + 1;
+    else while (end > offset && (bytes[end] & 0xc0) === 0x80) end--;
+  }
+  const slice = bytes.subarray(offset, end);
+  return { encoding: 'utf8', text: slice.toString('utf8'), nextOffset: end, eof: end === bytes.length };
+}
+
+// Phase 1, run under the manager's submission lock so it cannot race a
+// concurrent pi_cleanup of this same job directory: copies only the
+// verified public bytes the diff will need into the b/ side of a fresh
+// staging directory. Report entries are skipped by type, not by path, so a
+// real source file at reports/<name> is still included. Manifest omissions
+// and entries with encoding:'omitted' become omittedPaths. An entry whose
+// public path does not match the private checkpoint's raw path for the same
+// id was itself redacted; its path can never be trusted to look up the real
+// file at the base commit, so it is left out entirely.
+export async function stagePublicSide({ jobDir, manifest, checkpoint, stagingDir }) {
+  const checkpointPaths = new Map((checkpoint.entries || []).map(entry => [entry.id, entry.path]));
+  await fs.mkdir(path.join(stagingDir, 'a'), { mode: 0o700 });
+  await fs.mkdir(path.join(stagingDir, 'b'), { mode: 0o700 });
+  const omittedPaths = new Set();
+  for (const omission of manifest.omissions) if (omission.path) omittedPaths.add(omission.path);
+  const candidates = [];
+  const reasons = new Set();
+  for (const entry of manifest.entries) {
+    if (entry.type !== 'file' && entry.type !== 'delete') continue;
+    if (entry.encoding === 'omitted') { omittedPaths.add(entry.path); continue; }
+    const rawPath = checkpointPaths.get(entry.id);
+    if (rawPath === undefined || (entry.redacted && rawPath !== entry.path)) { reasons.add('redacted_path'); continue; }
+    safeRelative(entry.path);
+    if (entry.type === 'delete') { candidates.push({ id: entry.id, path: entry.path, type: 'delete' }); continue; }
+    await safeLstat(jobDir, `artifacts/public/${entry.id}`);
+    const { bytes } = await readRegular(path.join(jobDir, 'artifacts', 'public', entry.id), 16 * 1024 * 1024);
+    if (bytes.length !== entry.size || sha(bytes) !== entry.sha256) throw new Error('Artifact integrity failure');
+    await writeStagingFile(path.join(stagingDir, 'b'), entry.path, bytes, entry.mode);
+    candidates.push({ id: entry.id, path: entry.path, type: 'file', mode: entry.mode, bytes });
+  }
+  return { candidates, omittedPaths, reasons };
+}
+
+// Phase 2, run after the lock is released so repository I/O never blocks
+// other job submissions: resolves each candidate's base content from the
+// literal base commit tree, applies the base-side secret and size policy,
+// writes the a/ side, runs the single combined --no-index diff, and
+// sanitizes the final patch text once more before anything is returned.
+export async function completeAndRunDiff({ repository, baseCommit, candidates, stagingDir, bounds, sanitize = defaultSanitize, env = process.env, secrets = [] }) {
+  const gitEnv = isolatedGitEnv(env);
+  const reasons = new Set();
+  let baseTotal = 0;
+  const resolved = [];
+  // A candidate disqualified here (unsupported/oversized/secret-bearing base)
+  // must leave no trace: phase 1 already wrote its b/ side speculatively, so
+  // dropping it here is what makes the exclusion total rather than letting it
+  // leak through the diff as a spurious pure addition.
+  const dropStagedPublicSide = candidate => candidate.type === 'file' ? fs.rm(path.join(stagingDir, 'b', candidate.path), { force: true }) : Promise.resolve();
+  for (const candidate of candidates) {
+    const base = await resolveBaseFile(repository, baseCommit, candidate.path, gitEnv);
+    if (base.unsupported) { reasons.add('unsupported_base'); await dropStagedPublicSide(candidate); continue; }
+    if (!base.exists) {
+      if (candidate.type === 'delete') { reasons.add('unsupported_base'); continue; }
+      resolved.push({ path: candidate.path, change: 'added', binary: textBytes(candidate.bytes) === null });
+      continue;
+    }
+    const size = await blobSize(repository, base.oid, gitEnv);
+    if (size > bounds.maxFileBytes || baseTotal + size > bounds.maxTotalBytes) { reasons.add('oversized_base'); await dropStagedPublicSide(candidate); continue; }
+    const raw = await runGit(['-C', repository, 'cat-file', 'blob', base.oid], { env: gitEnv, maxBuffer: bounds.maxFileBytes + 1024 });
+    baseTotal += size;
+    const decoded = textBytes(raw);
+    let baseBytes;
+    if (decoded === null) {
+      const latin1 = raw.toString('latin1'), utf8 = raw.toString('utf8');
+      if (sanitize(latin1, env, secrets) !== latin1 || sanitize(utf8, env, secrets) !== utf8) { reasons.add('secret_bearing_base_binary'); await dropStagedPublicSide(candidate); continue; }
+      baseBytes = raw;
+    } else {
+      const cleaned = sanitize(decoded, env, secrets);
+      if (cleaned !== decoded) reasons.add('base_text_sanitized');
+      baseBytes = Buffer.from(cleaned, 'utf8');
+    }
+    const baseMode = modeNumber(base.mode);
+    await writeStagingFile(path.join(stagingDir, 'a'), candidate.path, baseBytes, baseMode);
+    if (candidate.type === 'delete') { resolved.push({ path: candidate.path, change: 'deleted', binary: decoded === null }); continue; }
+    const sameContent = candidate.bytes.equals(baseBytes), sameMode = baseMode === candidate.mode;
+    if (sameContent && sameMode) continue;
+    resolved.push({ path: candidate.path, change: sameContent ? 'mode' : 'modified', binary: decoded === null || textBytes(candidate.bytes) === null });
+  }
+  const diffEnv = { ...gitEnv, GIT_CEILING_DIRECTORIES: path.dirname(stagingDir) };
+  let bytes;
+  try {
+    bytes = (await exec('git', ['-c', 'core.attributesFile=/dev/null', 'diff', '--no-index', '--binary', '--full-index', '--no-renames', '--no-prefix', '--no-ext-diff', '--no-textconv', '--no-color', 'a', 'b'],
+      { cwd: stagingDir, env: diffEnv, timeout: 30000, maxBuffer: 32 * 1024 * 1024, encoding: 'buffer' })).stdout;
+  } catch (error) {
+    if (error.code === 1 && Buffer.isBuffer(error.stdout)) bytes = error.stdout;
+    else if (error.code === 'ERR_CHILD_PROCESS_STDOUT_MAXBUFFER' || /maxBuffer/i.test(error.message)) throw new Error('Patch exceeds bound');
+    else throw new Error(`git diff failed: ${(Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr || error.message)).slice(0, 2000)}`);
+  }
+  const decodedPatch = textBytes(bytes);
+  if (decodedPatch !== null) {
+    const cleaned = sanitize(decodedPatch, env, secrets);
+    if (cleaned !== decodedPatch) reasons.add('patch_text_sanitized');
+    bytes = Buffer.from(cleaned, 'utf8');
+  }
+  const sorted = resolved.sort((a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
+  return { bytes, reasons, files: sorted };
+}
