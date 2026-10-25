@@ -24,13 +24,13 @@ export function validateArtifactConfig(raw = {}) {
   if (result.maxFileBytes > result.maxTotalBytes || result.maxReadBytes > result.maxFileBytes) throw new Error('artifacts: inconsistent bounds');
   return result;
 }
-function safeRelative(value) {
+export function safeRelative(value) {
   if (typeof value !== 'string' || !value || value.length > 1024 || /[\p{Cc}\p{Cf}\\]/u.test(value) || path.posix.isAbsolute(value) || value !== value.normalize('NFC')) throw new Error('Unsafe artifact path');
   const parts = value.split('/');
   if (parts.some(part => !part || part === '.' || part === '..' || part !== part.trimEnd() || /^\.git$/i.test(part) || /^\.pi-mcp(?:-|$)/i.test(part))) throw new Error('Unsafe artifact path');
   return value;
 }
-async function readRegular(file, maxBytes) {
+export async function readRegular(file, maxBytes) {
   const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     const before = await handle.stat();
@@ -62,7 +62,7 @@ async function changedPaths(worktree, baseCommit, env) {
   ]);
   return [...new Set([...nulPaths(tracked), ...nulPaths(untracked)])].sort();
 }
-async function safeLstat(root, rel) {
+export async function safeLstat(root, rel) {
   const parts = safeRelative(rel).split('/'); let current = root;
   for (let i = 0; i < parts.length; i++) {
     current = path.join(current, parts[i]);
@@ -78,7 +78,7 @@ async function atomicJson(file, value) {
   await fs.writeFile(temp, JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600 });
   await fs.rename(temp, file);
 }
-function textBytes(bytes) {
+export function textBytes(bytes) {
   if (bytes.includes(0)) return null;
   const decoded = bytes.toString('utf8');
   return Buffer.from(decoded, 'utf8').equals(bytes) ? decoded : null;
@@ -261,7 +261,7 @@ export async function snapshotArtifacts({ jobDir, worktree, baseCommit, config =
   await atomicJson(path.join(root, 'manifest.json'), manifest);
   return manifest;
 }
-async function manifestAt(jobDir) {
+export async function manifestAt(jobDir) {
   await safeLstat(jobDir, 'artifacts/manifest.json');
   const { bytes } = await readRegular(path.join(jobDir, 'artifacts', 'manifest.json'), 12 * 1024 * 1024);
   const manifest = JSON.parse(bytes);
@@ -355,6 +355,18 @@ export async function readArtifact(jobDir, { artifact_id, offset = 0, length = 6
   if (bytes.length !== entry.size || sha(bytes) !== entry.sha256) throw new Error('Artifact integrity failure');
   const slice = bytes.subarray(offset, offset + bounded), nextOffset = offset + slice.length;
   return { artifact_id, offset, data_base64: slice.toString('base64'), encoding: 'base64', sha256: sha(slice), totalSha256: entry.sha256, nextOffset, eof: nextOffset === bytes.length, size: bytes.length };
+}
+// Shared shape/hash validation for the private checkpoint, usable by a reader
+// that only needs the raw (unsanitized) per-entry paths it records — e.g. to
+// confirm a public manifest entry's sanitized path was not itself redacted —
+// without restoreCheckpoint's own worktree-mutating restore semantics or its
+// stricter `complete` requirement.
+export async function readCheckpoint(jobDir) {
+  await safeLstat(jobDir, 'artifacts/private/checkpoint.json');
+  const checkpoint = JSON.parse((await readRegular(path.join(jobDir, 'artifacts', 'private', 'checkpoint.json'), 2 * 1024 * 1024)).bytes);
+  if (!/^[0-9a-f]{40}$/.test(checkpoint.baseCommit) || !Array.isArray(checkpoint.entries) || checkpoint.entries.length > 4096 || !hex.test(checkpoint.inputSnapshotDigest)) throw new Error('Invalid checkpoint manifest');
+  if (sha(JSON.stringify({ baseCommit: checkpoint.baseCommit, inputMaterialsDigest: checkpoint.inputMaterialsDigest, materialBaseline: checkpoint.materialBaseline, entries: checkpoint.entries })) !== checkpoint.inputSnapshotDigest) throw new Error('Checkpoint manifest integrity failure');
+  return checkpoint;
 }
 export async function restoreCheckpoint({ jobDir, worktree, env = process.env }) {
   const root = path.join(jobDir, 'artifacts', 'private');
