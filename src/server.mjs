@@ -14,13 +14,13 @@ const manager = await new Manager(config, childEnv).init();
 await manager.ensureDispatcher();
 const mcpSecrets = config.approvedMcp.servers.flatMap(server => Object.values(server.env || {}));
 const server = new McpServer({ name: 'pi-mcp', version: '0.1.0' }, {
-  instructions: 'Start with pi_health and pi_capabilities. Delegation queues a bounded job from a committed ref. Poll pi_status and pi_events; pi_result is a preview and pi_artifacts/pi_read_artifact expose complete bounded exports. request_id makes retries idempotent. Followups resume the current unsealed session or roll over long history into a fresh code-preserving session; forks use immutable terminal checkpoints. Inspect verification and acceptance separately and review all changes before integration.'
+  instructions: 'Start with pi_health and pi_capabilities. Delegation queues a bounded job from a committed ref. Poll pi_status and pi_events; pi_result is a preview and pi_artifacts/pi_read_artifact expose complete bounded exports. request_id makes retries idempotent. Followups resume the current unsealed session or roll over long history into a fresh code-preserving session; forks use immutable terminal checkpoints. Inspect verification and acceptance separately and review all changes before integration. A subagent loop is typically pi_delegate, then pi_wait, then pi_result, then pi_patch (metadata first with include_text:false), then review, then apply in a clean local worktree; waits beyond 45 seconds need a client request timeout that allows them.'
 });
 // Manager and artifact/event owners sanitize untrusted text before returning it.
 // Re-sanitizing the whole structured response can corrupt IDs, enum statuses,
 // digests and base64 when a short configured secret happens to match them.
-const out = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
-const wrap = fn => async args => { try { return out(await fn(args)); } catch (error) { return { isError: true, content: [{ type: 'text', text: String(sanitize(error.message, childEnv, mcpSecrets)) }] }; } };
+const out = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] });
+const wrap = fn => async (args, extra) => { try { return out(await fn(args, extra)); } catch (error) { return { isError: true, content: [{ type: 'text', text: String(sanitize(error.message, childEnv, mcpSecrets)) }] }; } };
 const id = z.string().regex(/^task-[0-9a-f-]{36}$/);
 const requestId = z.string().min(1).max(100).optional();
 const inlineImage = z.object({ mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']), data: z.string().max(1398104) }).strict();
@@ -54,6 +54,14 @@ server.registerTool('pi_status', {
   description: 'Read job progress and optionally wait up to 45 seconds.',
   inputSchema: { job_id: id, wait_seconds: z.number().min(0).max(45).default(0) }, annotations: { readOnlyHint: true, openWorldHint: false }
 }, wrap(args => manager.status(args.job_id, args.wait_seconds)));
+server.registerTool('pi_wait', {
+  description: 'Wait up to 300 seconds for one or more jobs to settle (terminal or quarantined). For a fan-out with until:any, drop settled job_ids before the next call.',
+  inputSchema: { job_ids: z.array(id).min(1).max(8), wait_seconds: z.number().min(0).max(300).default(45), until: z.enum(['any', 'all']).default('any') },
+  annotations: { readOnlyHint: true, openWorldHint: false }
+}, wrap((args, extra) => manager.wait(args.job_ids, {
+  waitSeconds: args.wait_seconds, until: args.until, signal: extra.signal,
+  onProgress: extra._meta?.progressToken !== undefined ? async progress => { try { await extra.sendNotification({ method: 'notifications/progress', params: { progressToken: extra._meta.progressToken, ...progress } }); } catch {} } : undefined
+})));
 server.registerTool('pi_result', {
   description: 'Read bounded result, errors and Git inventory for a job.', inputSchema: { job_id: id }, annotations: { readOnlyHint: true, openWorldHint: false }
 }, wrap(args => manager.result(args.job_id)));

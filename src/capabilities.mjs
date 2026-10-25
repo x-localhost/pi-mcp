@@ -15,6 +15,8 @@ export function capabilities(config) {
     context: { version: 1, ...(config.context || {}) }, observation: { version: 1, ...(config.observation || {}) },
     providerRecovery: { version: 1, ...(config.providerRecovery || {}) },
     limits: { maxConcurrent: config.maxConcurrent, maxTimeoutSeconds: config.maxTimeoutSeconds, defaultMaxTurns: config.defaultMaxTurns,
-      maxSelectedVerifiers: config.verification?.maxSelected, maxMaterials: 32, maxInlineImages: 4 }
+      maxSelectedVerifiers: config.verification?.maxSelected, maxMaterials: 32, maxInlineImages: 4 },
+    claudeCode: { version: 1, wait: { maxJobs: 8, defaultWaitSeconds: 45, maxWaitSeconds: 300, pollMs: 1000, progressMs: 10000 },
+      patch: { maxPageBytes: 262144, defaultPageBytes: 65536, maxPatchBytes: 33554432 } }
   };
 }

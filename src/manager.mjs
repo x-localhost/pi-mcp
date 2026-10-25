@@ -624,6 +624,66 @@ export class Manager {
       await sleep(400);
     }
   }
+  async wait(jobIds, { waitSeconds = 45, until = 'any', signal, onProgress } = {}) {
+    const ids = Array.isArray(jobIds) ? jobIds : [];
+    if (!ids.length || ids.length > 8) throw new Error('job_ids must have 1 to 8 entries');
+    if (new Set(ids).size !== ids.length) throw new Error('Duplicate job_ids');
+    const mode = until === 'all' ? 'all' : 'any';
+    const seconds = Math.min(Math.max(Number(waitSeconds) || 0, 0), 300);
+    const settledJobs = new Map(); const pendingJobs = new Map();
+    for (const jobId of ids) {
+      let job;
+      try { job = await this.status(jobId, 0); }
+      catch (error) { throw error.code === 'ENOENT' ? new Error(`Job not found: ${jobId}`) : error; }
+      (terminal.has(job.status) || job.status === 'quarantined' ? settledJobs : pendingJobs).set(jobId, job);
+    }
+    const satisfied = () => mode === 'all' ? pendingJobs.size === 0 : settledJobs.size > 0;
+    const startedAt = performance.now(); const deadline = startedAt + seconds * 1000;
+    let nextProgressAt = 10;
+    while (!satisfied() && seconds > 0 && !signal?.aborted && performance.now() < deadline) {
+      await new Promise(resolve => {
+        const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, Math.min(1000, deadline - performance.now()));
+        signal?.addEventListener('abort', done, { once: true });
+      });
+      if (signal?.aborted) break;
+      await Promise.all([...pendingJobs.keys()].map(async jobId => {
+        const job = await this.status(jobId, 0);
+        if (terminal.has(job.status) || job.status === 'quarantined') { pendingJobs.delete(jobId); settledJobs.set(jobId, job); }
+        else pendingJobs.set(jobId, job);
+      }));
+      if (onProgress) {
+        const elapsed = Math.floor((performance.now() - startedAt) / 1000);
+        if (elapsed >= nextProgressAt) { await onProgress({ progress: elapsed, total: seconds, message: `${settledJobs.size}/${ids.length} settled` }); nextProgressAt = elapsed + 10; }
+      }
+    }
+    const timedOut = !satisfied();
+    const byId = new Map([...settledJobs, ...pendingJobs]);
+    const next = job => job.status === 'completed' ? 'pi_result for the summary; pi_patch to review or apply'
+      : terminal.has(job.status) ? 'pi_result for the error; pi_followup to continue'
+      : job.status === 'quarantined' ? 'unsafe: report it; pi_recover inspects ownership' : 'pi_wait again';
+    const summarize = (jobId, job) => {
+      const diffLines = typeof job.diffStat === 'string' ? job.diffStat.split('\n').filter(line => line.trim()) : [];
+      const changedFileCount = Array.isArray(job.changedFiles) ? job.changedFiles.length : 0;
+      const summary = { id: jobId, title: typeof job.title === 'string' ? job.title.slice(0, 150) : job.title,
+        status: job.status, settled: terminal.has(job.status) || job.status === 'quarantined' };
+      if (job.finishedAt !== undefined) summary.finishedAt = job.finishedAt;
+      if (typeof job.error === 'string') summary.error = job.error.slice(0, 500);
+      if (typeof job.warning === 'string') summary.warning = job.warning.slice(0, 500);
+      if (job.verification?.status !== undefined) summary.verification = job.verification.status;
+      if (job.acceptance?.status !== undefined) summary.acceptance = job.acceptance.status;
+      summary.changedFileCount = changedFileCount; summary.changedFileCountIsLowerBound = changedFileCount >= 200;
+      if (diffLines.length) summary.diffSummary = diffLines.at(-1);
+      if (typeof job.lastProgress === 'string') summary.lastProgress = job.lastProgress.slice(0, 300);
+      if (job.numTurns !== undefined) summary.numTurns = job.numTurns;
+      if (job.providerRecovery?.attempts !== undefined) summary.providerRecoveryAttempts = job.providerRecovery.attempts;
+      summary.next = next(job);
+      return summary;
+    };
+    return { until: mode, timedOut, elapsedSeconds: Number(((performance.now() - startedAt) / 1000).toFixed(1)),
+      settled: ids.filter(jobId => settledJobs.has(jobId)), pending: ids.filter(jobId => pendingJobs.has(jobId)),
+      jobs: ids.map(jobId => summarize(jobId, byId.get(jobId))) };
+  }
   async expireQueue(id) {
     return this.lock(async () => {
       const job = await this.read(id);
