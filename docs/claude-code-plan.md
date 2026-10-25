@@ -54,6 +54,13 @@ Owner files: `src/server.mjs`, `src/manager.mjs` (new methods only, plus the `un
 - It is built from the immutable artifact snapshot, never from the live worktree, so a later followup cannot change an earlier job's patch.
 - `applicable` is true only when all of these hold: `manifest.exportComplete`, no entry is redacted or omitted, every base path is a regular file or absent (not a symlink or submodule), and sanitizing the final patch text leaves it unchanged. Otherwise the patch is still returned for review, with `applicable: false` and `notApplicableReasons` (bounded).
 - It must not write objects, refs or index entries to the user's repository. Temporary material lives under the job directory and is removed afterwards.
+- Generation method, checked by the lead with a local `git apply` round trip:
+  - Write the base version of each path under `<tmp>/a/<path>`. Take it from `git cat-file` at `baseCommit`, with its tree mode.
+  - Write the public export version under `<tmp>/b/<path>`, with the entry's mode.
+  - With `cwd=<tmp>`, run `git diff --no-index --binary --full-index --no-renames --no-prefix --no-ext-diff --no-color a b`.
+  - Use a neutral git config: `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`.
+  - Exit code 1 means there are differences.
+  - Added files print as `diff --git b/p b/p` and deleted files as `diff --git a/p a/p`. `git apply` (`-p1`) accepts both. The round trip also covered binary files, deletes, mode flips and paths with spaces.
 - Cache:
   - The patch is built on first request and cached at `<jobDir>/patch/changes.patch` with `<jobDir>/patch/patch.json` holding `{ version: 1, key, sha256, totalBytes, applicable, encoding, files, omittedPaths, notApplicableReasons }`.
   - `key` is the sha256 of `baseCommit` plus the non-report manifest entries.
