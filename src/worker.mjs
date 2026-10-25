@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { RpcClient } from './rpc.mjs';
 import { atomicJson, git } from './manager.mjs';
 import { sanitize } from './sanitize.mjs';
-import { scanTemplate, validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
+import { validateProviderHeaders, collectHeaderSecrets, collectConfigSecrets } from './headers.mjs';
 import { processIdentity, stopOwnedGroup, groupState } from './ownership.mjs';
 import { snapshotArtifacts, attachArtifactReport } from './artifacts.mjs';
 import { runVerifier, evaluateVerification, reconcileFinalSnapshot } from './verification.mjs';
@@ -46,32 +46,17 @@ let eventChain = Promise.resolve(), usageBaseline = null, stopPromise, lastAssis
 const seenObservationIds = new Set();
 const secretValues = [];
 secretValues.push(...(runtime.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value)));
-// A value reached through a "headers" map is treated as secret regardless of
-// length (even 1-5 characters), since arbitrary custom header names cannot be
-// recognized by the generic token/key/secret/... name pattern below. Uses the
-// same $$ / $! / $NAME / ${NAME} grammar as src/headers.mjs so an escaped
-// literal is never mistaken for an unresolved (and then leaked) reference.
-const collectSecrets = (value, key = '', sensitive = false, headerSourced = false) => {
-  if (typeof value === 'string' && (sensitive || headerSourced || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
-    let resolved = '';
-    for (const part of scanTemplate(value)) {
-      if (part.type === 'literal') { resolved += part.text; continue; }
-      const replacement = process.env[part.name];
-      if (typeof replacement !== 'string') continue;
-      if (headerSourced || replacement.length >= 6) secretValues.push(replacement);
-      resolved += replacement;
-    }
-    if (resolved && (headerSourced || resolved.length >= 6)) secretValues.push(resolved);
-  } else if (value && typeof value === 'object') {
-    const childHeaderSourced = headerSourced || /headers?/i.test(key);
-    for (const [childKey, entry] of Object.entries(value)) collectSecrets(entry, childKey, sensitive || /headers?/i.test(key), childHeaderSourced);
-  }
-};
 const refreshSecrets = async () => {
   const configs = {};
   for (const name of ['auth.json', 'models.json']) {
-    try { configs[name] = JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); collectSecrets(configs[name]); } catch {}
+    try { configs[name] = JSON.parse(await fs.readFile(path.join(runtime.agentDir, name), 'utf8')); } catch {}
   }
+  // collectConfigSecrets() is the shared walk (src/headers.mjs) over each
+  // config individually, same as calling it once per file here; a value
+  // reached through a "headers" map is treated as secret regardless of
+  // length (even 1-5 characters), since arbitrary custom header names cannot
+  // be recognized by its generic token/key/secret/... name pattern.
+  secretValues.push(...collectConfigSecrets(Object.values(configs), process.env));
   secretValues.push(...collectHeaderSecrets(configs['models.json'], configs['auth.json'], process.env));
 };
 await refreshSecrets();

@@ -73,6 +73,12 @@ test('pi_patch round trip through the MCP client reproduces the checkpoint via g
   await writeFile(path.join(wt, 'added.txt'), 'new file\n');
   await writeFile(path.join(wt, 'script.sh'), '#!/bin/sh\necho hi\n', 0o755);
   await writeFile(path.join(wt, 'with space', 'nested dir', 'café-日本語.txt'), 'nonascii content\n');
+  // A literal double-quote in the filename always forces git to quote and
+  // backslash-escape the whole path in the diff header (diff --git
+  // "a/say \"hi\".txt" ...), independent of core.quotePath (which only
+  // governs non-ASCII bytes); proves that change did not break the
+  // quoting git apply still needs for an actually-special character.
+  await writeFile(path.join(wt, 'say "hi".txt'), 'quoted name content\n');
   await writeFile(path.join(wt, 'reports', 'x'), 'real source file under reports/\n');
   await writeFile(path.join(wt, 'images', 'pic.bin'), Buffer.from([0, 1, 2, 3, 255, 254, 0]));
   const { job: completed } = await finish(manager, job);
@@ -125,6 +131,7 @@ test('pi_patch round trip through the MCP client reproduces the checkpoint via g
   assert.equal(await fs.readFile(path.join(fresh, 'added.txt'), 'utf8'), 'new file\n');
   assert.equal((await fs.stat(path.join(fresh, 'script.sh'))).mode & 0o777, 0o755);
   assert.equal(await fs.readFile(path.join(fresh, 'with space', 'nested dir', 'café-日本語.txt'), 'utf8'), 'nonascii content\n');
+  assert.equal(await fs.readFile(path.join(fresh, 'say "hi".txt'), 'utf8'), 'quoted name content\n');
   assert.equal(await fs.readFile(path.join(fresh, 'reports', 'x'), 'utf8'), 'real source file under reports/\n');
   assert.deepEqual(await fs.readFile(path.join(fresh, 'images', 'pic.bin')), Buffer.from([0, 1, 2, 3, 255, 254, 0]));
 
@@ -140,6 +147,7 @@ test('pi_patch round trip through the MCP client reproduces the checkpoint via g
   assert.equal(byPath['script.sh'].change, 'mode');
   assert.equal(byPath['images/pic.bin'].binary, true);
   assert.equal(byPath['with space/nested dir/café-日本語.txt'].change, 'added');
+  assert.equal(byPath['say "hi".txt'].change, 'added');
   assert.equal(meta.filesTruncated, false);
   assert.deepEqual(meta.omittedPaths, []);
 });
@@ -265,6 +273,48 @@ test('a secret-bearing base binary is left out of the patch entirely', async t =
   assert.ok(page.notApplicableReasons.includes('secret_bearing_base_binary'));
   assert.equal(page.files.some(f => f.path === 'secret.bin'), false);
   assert.doesNotMatch(page.text, /super-secret-value-456/);
+});
+
+test('a literal credential-shaped value in models.json, never reaching a header map, is sanitized out of a deleted base text file', async t => {
+  const { root, repository, manager } = await fixture(t);
+  // No Bearer prefix, not in a secret-named env var, not inside a configured
+  // "headers" map: headerSecretValues() alone never sees this at all.
+  // patchSecretValues() must still catch it through the same credential walk
+  // worker.mjs uses for its own redaction (collectConfigSecrets).
+  const secretValue = 'sk-live-aBcDeFgHiJkLmN01';
+  await writeFile(path.join(repository, 'secret.txt'), `keep\n${secretValue}\nkeep2\n`);
+  git(repository, 'add', 'secret.txt'); git(repository, 'commit', '-qm', 'secret file');
+  const modelsFile = path.join(root, 'test-models.json');
+  await fs.writeFile(modelsFile, JSON.stringify({ providers: { mock: { apiKey: secretValue, models: [{ id: 'mock' }] } } }));
+  manager.config.modelsFile = modelsFile;
+  const job = await admit(manager, repository);
+  await fs.rm(path.join(job.worktree, 'secret.txt'));
+  const { job: completed } = await finish(manager, job);
+  const page = await manager.patch(completed.id);
+  assert.equal(page.applicable, false);
+  assert.ok(page.notApplicableReasons.includes('base_text_sanitized'), JSON.stringify(page.notApplicableReasons));
+  assert.doesNotMatch(page.text, /sk-live-aBcDeFgHiJkLmN01/);
+  assert.match(page.text, /\[redacted\]/);
+  assert.equal(page.files.find(f => f.path === 'secret.txt').change, 'deleted');
+});
+
+test('the same literal credential-shaped value inside a base binary file the job modifies is dropped entirely and counted', async t => {
+  const { root, repository, manager } = await fixture(t);
+  const secretValue = 'sk-live-aBcDeFgHiJkLmN01';
+  await fs.writeFile(path.join(repository, 'secret.bin'), Buffer.concat([Buffer.from([0]), Buffer.from(secretValue)]));
+  git(repository, 'add', 'secret.bin'); git(repository, 'commit', '-qm', 'secret binary from models.json credential');
+  const modelsFile = path.join(root, 'test-models-bin.json');
+  await fs.writeFile(modelsFile, JSON.stringify({ providers: { mock: { apiKey: secretValue, models: [{ id: 'mock' }] } } }));
+  manager.config.modelsFile = modelsFile;
+  const job = await admit(manager, repository);
+  await fs.writeFile(path.join(job.worktree, 'secret.bin'), Buffer.concat([Buffer.from([0]), Buffer.from('harmless replacement')]));
+  const { job: completed } = await finish(manager, job);
+  const page = await manager.patch(completed.id);
+  assert.equal(page.applicable, false);
+  assert.ok(page.notApplicableReasons.includes('secret_bearing_base_binary'), JSON.stringify(page.notApplicableReasons));
+  assert.equal(page.files.some(f => f.path === 'secret.bin'), false);
+  assert.ok(page.omittedPaths.includes('secret.bin'), JSON.stringify(page.omittedPaths));
+  assert.ok(page.omittedCount >= 1, String(page.omittedCount));
 });
 
 test('a real omission without a manifest entry makes the patch not applicable and is listed', async t => {
@@ -466,22 +516,42 @@ test('pi_cleanup running between the unlocked build phase and publication makes 
   assert.deepEqual(remainingStaging, []);
 });
 
-test('pi_cleanup running during the active, unlocked build phase makes patch() reject without recreating the job or leaving a staging directory', async t => {
+test('pi_cleanup overlapping the active, unlocked build phase (racing it, not merely preceding it) makes patch() reject without recreating the job or leaving a staging directory', async t => {
   const { repository, manager, config } = await fixture(t);
   const job = await admit(manager, repository);
   await writeFile(path.join(job.worktree, 'base.txt'), 'changed during active build\n');
   const { job: completed } = await finish(manager, job);
 
-  // buildPatch() is the seam patch() calls for its unlocked phase-2 build:
-  // override it to run a real pi_cleanup, through a second independent
-  // Manager instance racing for the real lock, while the build is genuinely
-  // still in flight (unlike the publish-phase-lock race above, nothing here
-  // is held or synchronized), then delegate to the real build.
+  // buildPatch() is the seam patch() calls for its unlocked phase-2 build.
+  // completeAndRunDiff() always calls sanitize() synchronously and uses its
+  // return value directly without awaiting it, so the wrapper below must
+  // not itself delay that return — doing so would hand back a Promise where
+  // a string is compared and Buffer-wrapped, corrupting the base-content
+  // check. Instead, the wrapper's FIRST call — which happens exactly where
+  // this finding points, while base.txt's base content is read and
+  // sanitized — resolves a one-shot "reached" signal synchronously before
+  // returning the real sanitize() result unchanged. buildPatch() awaits
+  // that signal, THEN starts a real pi_cleanup (through a second,
+  // independent Manager instance) while the build keeps running
+  // concurrently in the background, and only awaits the build's own
+  // completion afterward. This guarantees cleanup never starts before the
+  // build has begun touching base content, and the build is never fully
+  // awaited to completion before cleanup starts either — a genuine race
+  // between the two, not the fully sequential ordering of the prior test.
   class ActiveBuildCleanupManager extends Manager {
     async buildPatch(args) {
+      let releaseReached;
+      const reached = new Promise(resolve => { releaseReached = resolve; });
+      let firstCall = true;
+      const wrappedSanitize = (...callArgs) => {
+        if (firstCall) { firstCall = false; releaseReached(); }
+        return args.sanitize(...callArgs);
+      };
+      const buildPromise = completeAndRunDiff({ ...args, sanitize: wrappedSanitize });
+      await reached;
       const other = await new Manager({ ...config }, {}, { spawnWorker: false }).init();
       await other.cleanup({ job_ids: [completed.id], dry_run: false });
-      return completeAndRunDiff(args);
+      return buildPromise;
     }
   }
   const racing = await new ActiveBuildCleanupManager({ ...config }, {}, { spawnWorker: false }).init();
