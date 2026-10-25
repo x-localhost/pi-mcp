@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sanitize } from './sanitize.mjs';
-import { validateProviderHeaders, collectHeaderSecrets } from './headers.mjs';
+import { validateProviderHeaders, collectHeaderSecrets, collectConfigSecrets } from './headers.mjs';
 import { withOwnershipLock } from './ownership.mjs';
 import { appendJobEvent, readJobEvents } from './events.mjs';
 import { applyOfflineMaterials } from './offline-materials.mjs';
@@ -430,6 +430,20 @@ export class Manager {
     return [...collectHeaderSecrets(modelsConfig, authConfig, this.childEnv),
       ...(this.config.approvedMcp?.servers || []).flatMap(server => Object.values(server.env || {}).filter(value => typeof value === 'string' && value))];
   }
+  // Everything headerSecretValues() covers, plus every literal/templated
+  // credential-shaped value in auth.json/models.json that worker.mjs's own
+  // redaction walk (collectConfigSecrets, src/headers.mjs) would mask for a
+  // running job. A value that never reaches a configured header map (e.g. a
+  // plain "apiKey" field with no Bearer prefix) is invisible to
+  // headerSecretValues() alone, yet a completed job's exported checkpoint
+  // can still legitimately contain it (for example inside a deleted base
+  // file), so pi_patch needs this wider set for both sanitization and its
+  // cache key digest.
+  async patchSecretValues() {
+    const modelsConfig = await this.loadAgentJson('models.json', this.config.modelsFile).catch(() => null);
+    const authConfig = await this.loadAgentJson('auth.json', this.config.authFile).catch(() => null);
+    return [...await this.headerSecretValues(), ...collectConfigSecrets([modelsConfig, authConfig], this.childEnv)];
+  }
   async seedAgent() {
     for (const [explicit, name] of [[this.config.modelsFile, 'models.json'], [this.config.authFile, 'auth.json']]) {
       const source = explicit || (this.config.agentDir && await fs.stat(path.join(this.config.agentDir, name)).then(() => true, () => false) ? path.join(this.config.agentDir, name) : null);
@@ -832,7 +846,11 @@ export class Manager {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid offset');
     if (!Number.isSafeInteger(max_bytes) || max_bytes < 4096 || max_bytes > 262144) throw new Error('Invalid max_bytes');
     const generator = 1;
-    const secrets = await this.headerSecretValues();
+    // patchSecretValues() is strictly wider than headerSecretValues(): it
+    // also covers every literal/templated credential-shaped value in
+    // auth.json/models.json that never reaches a configured header map,
+    // which a deleted or modified base file can still legitimately contain.
+    const secrets = await this.patchSecretValues();
     // sanitize() masks header secrets and secret-named child env values; the
     // cache key must change whenever either set does.
     const envSecrets = Object.entries(this.childEnv).filter(([name, value]) => /(?:token|key|secret|password|proxy|auth|credential)/i.test(name) && typeof value === 'string').map(([name, value]) => `${name}=${value}`);

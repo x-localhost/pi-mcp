@@ -162,6 +162,47 @@ export function allHeaderRefNames(modelsConfig) {
   return names;
 }
 
+// Walks one or more already-parsed JSON config objects (typically auth.json
+// and models.json) for literal credential-shaped values, resolving any
+// $NAME/${NAME} template reference against env with the exact same grammar
+// a header value uses (scanTemplate above), and returns every value found
+// as a plain array. This is worker.mjs's own redaction walk, extracted here
+// so Manager.patchSecretValues() can sanitize a completed job's exported
+// patch against the exact same values a running job would have masked —
+// including a literal credential that never reaches a configured header map
+// (e.g. a plain "apiKey" field with no Bearer prefix), which
+// collectHeaderSecrets() above does not see at all.
+//
+// A key matching /(?:token|key|secret|password|access|refresh|auth|credential)/i,
+// or any key nested under a "headers" map regardless of its own name, is
+// secret-worthy. Under a "headers" map every length counts, since an
+// arbitrary custom header name cannot be recognized by that pattern;
+// otherwise only length >= 6 is kept, so short, common strings elsewhere are
+// not globally treated as secret. A config entry that is missing, null, or
+// failed to parse is simply skipped, matching a caller that only collects
+// configs it managed to load.
+export function collectConfigSecrets(configs, env = process.env) {
+  const secretValues = [];
+  const walk = (value, key = '', sensitive = false, headerSourced = false) => {
+    if (typeof value === 'string' && (sensitive || headerSourced || /(?:token|key|secret|password|access|refresh|auth|credential)/i.test(key))) {
+      let resolved = '';
+      for (const part of scanTemplate(value)) {
+        if (part.type === 'literal') { resolved += part.text; continue; }
+        const replacement = env[part.name];
+        if (typeof replacement !== 'string') continue;
+        if (headerSourced || replacement.length >= 6) secretValues.push(replacement);
+        resolved += replacement;
+      }
+      if (resolved && (headerSourced || resolved.length >= 6)) secretValues.push(resolved);
+    } else if (value && typeof value === 'object') {
+      const childHeaderSourced = headerSourced || /headers?/i.test(key);
+      for (const [childKey, entry] of Object.entries(value)) walk(entry, childKey, sensitive || /headers?/i.test(key), childHeaderSourced);
+    }
+  };
+  for (const config of configs || []) if (config) walk(config);
+  return secretValues;
+}
+
 // Return every value that can reach a configured header, including literal and
 // compound values. Credential env follows Pi's provider/model scope rules.
 export function collectHeaderSecrets(modelsConfig, authConfig, childEnv = {}) {
