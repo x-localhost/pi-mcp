@@ -280,6 +280,34 @@ Before integration, this test is expected to fail only on `pi_wait` and `pi_patc
 - A Claude Code plugin package is deferred, because plugin MCP tool names (`mcp__plugin_<p>_<s>__*`) would fork the agent's tool list.
 - `exportComplete` includes reports, so a redacted report alone makes a source patch not applicable. This is conservative, and kept on purpose.
 
-## Results
+## Results — 2026-10-26
 
-(filled after integration)
+All runs were on gram with image `pi-mcp-cck:base-20261026` (`node:24.22.0-bookworm` + rg/fd + locked deps) and `--network none`, using `/tmp/pi-mcp-claude-code-20261026/run-suite.sh`.
+
+| Tree | Full suite |
+| --- | --- |
+| Base `1253842` (plan only) | 467/467 |
+| Units A+P+B integrated `a146f5f` | 500/500 |
+| Review fixes round 1 `8f40dbd` | 504/504 |
+| Round 2 `4124ba3` | 508/508 |
+| Round 3 `f9af8bf` | 517/517 |
+| Final `4eb3974` | see handoff |
+
+Units:
+- Kit (Unit B) was built by GPT-6 Luna (bridge `luna_worker`, job `task-76ed3783`). The lead moved the operations section and added the subagent usage example.
+- `pi_wait` (Unit A) and `pi_patch` (Unit P) were built by native Sonnet implementers. Unit P was planned for GPT-6 Sol, but bridge jobs cannot reach gram for TDD, so it went to Sonnet.
+- Lead edits: the abort-listener cleanup in `wait()` and a test timing fix; the env-secret cache key, child env for `export-patch.mjs` and staging cleanup; a fail-closed probe for non-UTF-8 patches; and keeping worker credential collection inside the per-file `try`.
+- The RED/GREEN commands and observations are in each unit report (lead transcript). Each unit's focused tests ran 3× for stability.
+
+Independent review — Astra (`astra_reviewer`):
+- Round 1 (`task-87aa8b1a`) rejected: binary/path secret escape, sanitized size bound, wait abort, omission bound, git env in `repository()`, untested cleanup race.
+- Round 2 (`task-b1837463`) rejected: git octal-quoted non-ASCII paths bypassed the sanitizer; omission accounting; initial-sweep abort.
+- Round 3 (`task-419aad2e`) rejected: literal `auth.json`/`models.json` credentials were missing from patch sanitization.
+- Round 4 (`task-fb9899ce`) approved with no blocking findings. Its two remaining should-level notes:
+  - Collector containment is fixed in `4eb3974`.
+  - The overlapping-cleanup test still depends on scheduling. `sanitize()` is synchronous, so the build cannot be held open without a seam inside `completeAndRunDiff`. Correctness rests on publication re-reading the job under the lock and never recreating the job directory.
+
+Not verified:
+- A live Claude Code session driving the kit. There is no paid model call and no live MCP or global settings change.
+- Real corporate LLM behaviour.
+- The internal Docker profile's `export-patch.mjs` against a real compose stack. It is covered by unit tests only.
