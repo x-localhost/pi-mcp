@@ -16,7 +16,7 @@ The optional top-level sections below reject unknown keys and invalid values. Th
     ]
   },
   "budgets": { "maxInputTokens": 100000, "maxOutputTokens": 20000, "maxTotalTokens": 120000 },
-  "retention": { "maxStateBytes": 4294967296, "maxScanEntries": 100000, "terminalDays": 30 },
+  "retention": { "maxStateBytes": 4294967296, "maxScanEntries": 1000000, "terminalDays": 30 },
   "artifacts": { "maxFiles": 256, "maxFileBytes": 2097152, "maxTotalBytes": 33554432, "maxReadBytes": 65536 },
   "offlineMaterials": { "materials": [] },
   "approvedMcp": { "servers": [] }

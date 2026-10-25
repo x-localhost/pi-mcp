@@ -97,7 +97,7 @@ function normalizeBudgets(raw = {}) {
 function normalizeRetention(raw = {}) {
   strictObject(raw, ['maxStateBytes', 'maxScanEntries', 'terminalDays'], 'retention');
   return { maxStateBytes: bounded(raw, 'maxStateBytes', 4 * 1024 * 1024 * 1024, 1048576, 1024 * 1024 * 1024 * 1024, 'retention'),
-    maxScanEntries: bounded(raw, 'maxScanEntries', 100000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
+    maxScanEntries: bounded(raw, 'maxScanEntries', 1000000, 100, 1000000, 'retention'), terminalDays: bounded(raw, 'terminalDays', 30, 0, 3650, 'retention') };
 }
 // maxAttempts: 0 disables the worker's bounded continuation-prompt recovery
 // (see src/provider-recovery.mjs and docs/provider-resilience.md) entirely;
