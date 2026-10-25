@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Manager } from '../src/manager.mjs';
 import { snapshotArtifacts } from '../src/artifacts.mjs';
-import { pagePatch } from '../src/patch.mjs';
+import { pagePatch, completeAndRunDiff } from '../src/patch.mjs';
 
 const serverPath = fileURLToPath(new URL('../src/server.mjs', import.meta.url));
 const fake = fileURLToPath(new URL('./fixtures/fake-pi.mjs', import.meta.url));
@@ -190,6 +190,39 @@ test('pagePatch pages utf8 text at newline or character boundaries, falls back t
   assert.throws(() => pagePatch(binary, binary.length + 1, 4096), /offset/i);
 });
 
+test('completeAndRunDiff enforces maxPatchBytes against the sanitized bytes, not just the raw diff', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-patch-bound-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repository = path.join(root, 'repo'); await fs.mkdir(repository);
+  git(repository, 'init', '-q'); git(repository, 'config', 'user.email', 'test@example.invalid'); git(repository, 'config', 'user.name', 'Test');
+  await writeFile(path.join(repository, 'base.txt'), 'line one\n');
+  git(repository, 'add', '-A'); git(repository, 'commit', '-qm', 'base');
+  const baseCommit = git(repository, 'rev-parse', 'HEAD');
+  const bounds = { maxFiles: 256, maxFileBytes: 2 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, maxReadBytes: 64 * 1024 };
+  // A one-character "secret" (only possible through extraSecrets, which —
+  // unlike sanitize()'s own env-name scan — allows any length) repeated many
+  // times: each occurrence becomes the ten-character "[redacted]", which can
+  // only grow the text. Git's own maxBuffer, checked against the raw diff
+  // before sanitization, cannot by itself keep the final sanitized result
+  // under a bound.
+  const publicBytes = Buffer.from('x'.repeat(5) + 'a'.repeat(100) + '\n');
+  const makeCandidates = () => [{ id: 'a000001', path: 'base.txt', displayPath: 'base.txt', type: 'file', mode: 0o644, bytes: publicBytes }];
+  const build = async maxPatchBytes => {
+    const stagingDir = await fs.mkdtemp(path.join(root, 'stage-'));
+    // completeAndRunDiff (phase 2) only ever writes the a/ (base) side; the
+    // b/ (public) side is normally written by stagePublicSide (phase 1), so
+    // a direct call here has to replicate that one write itself.
+    await fs.mkdir(path.join(stagingDir, 'b'), { recursive: true, mode: 0o700 });
+    await writeFile(path.join(stagingDir, 'b', 'base.txt'), publicBytes, 0o644);
+    try { return await completeAndRunDiff({ repository, baseCommit, candidates: makeCandidates(), stagingDir, bounds, env: {}, secrets: ['a'], ...(maxPatchBytes !== undefined ? { maxPatchBytes } : {}) }); }
+    finally { await fs.rm(stagingDir, { recursive: true, force: true }); }
+  };
+  const unbounded = await build();
+  assert.ok(unbounded.reasons.has('patch_text_sanitized'));
+  assert.ok(unbounded.bytes.length > 900, String(unbounded.bytes.length)); // proves real expansion happened
+  await assert.rejects(build(unbounded.bytes.length - 1), /Patch exceeds bound/);
+});
+
 test('include_text false returns metadata only and matches a text call at the same offset', async t => {
   const { repository, manager } = await fixture(t);
   const job = await admit(manager, repository);
@@ -249,6 +282,33 @@ test('a real omission without a manifest entry makes the patch not applicable an
   assert.ok(page.notApplicableReasons.includes('export_incomplete'));
   assert.ok(page.omittedPaths.includes('big.txt'));
   assert.equal(page.files.some(f => f.path === 'big.txt'), false);
+});
+
+test('omitted paths beyond 200 are capped with omittedPathsTruncated and omittedCount, keeping the cached descriptor within the cache reader bound', async t => {
+  const { repository, manager } = await fixture(t);
+  const job = await admit(manager, repository);
+  for (let i = 0; i < 260; i++) {
+    const longName = `many/${'x'.repeat(200)}-${String(i).padStart(4, '0')}.txt`;
+    await writeFile(path.join(job.worktree, longName), 'content\n');
+  }
+  const jobDir = manager.jobDir(job.id);
+  const manifest = await snapshotArtifacts({ jobDir, worktree: job.worktree, baseCommit: job.baseCommit,
+    config: { maxFiles: 1, maxFileBytes: 1024 * 1024, maxTotalBytes: 16 * 1024 * 1024, maxReadBytes: 1024 }, env: manager.childEnv });
+  assert.ok(manifest.omittedCount > 200, String(manifest.omittedCount));
+  const completed = { ...job, status: 'completed', execution: { status: 'passed' },
+    artifacts: { checkpointComplete: manifest.checkpointComplete, inputSnapshotDigest: manifest.inputSnapshotDigest, manifestSha256: manifest.manifestSha256 } };
+  await fs.writeFile(path.join(jobDir, 'job.json'), JSON.stringify(completed));
+  const page = await manager.patch(completed.id);
+  assert.equal(page.applicable, false);
+  assert.equal(page.omittedPaths.length, 200);
+  assert.equal(page.omittedPathsTruncated, true);
+  assert.equal(page.omittedCount, manifest.omittedCount);
+  // readCached()'s descriptor/meta reads are capped at 1 MiB; a second call
+  // must still read the just-published cache back successfully, proving the
+  // writer never produced a descriptor the reader itself could not open.
+  const again = await manager.patch(completed.id);
+  assert.equal(again.sha256, page.sha256);
+  assert.equal(again.omittedPathsTruncated, true);
 });
 
 test('an unsafe base ancestor (a symlink hiding a deeper added path) is refused rather than treated as a plain addition', async t => {
@@ -329,13 +389,34 @@ test('a tampered patch.json or cached patch file is detected and rebuilt correct
   assert.equal(sha(await fs.readFile(patchFile)), first.sha256);
 });
 
-test('concurrent generation from two manager instances converges on the same patch without error', async t => {
+// A barrier that releases every caller only once `count` of them have
+// reached it, so a test can force two independent async flows to overlap at
+// a specific point instead of merely hoping Promise.all interleaves them.
+function makeBarrier(count) {
+  let waiting = 0, release;
+  const ready = new Promise(resolve => { release = resolve; });
+  return async () => { waiting++; if (waiting >= count) release(); await ready; };
+}
+
+test('concurrent generation from two manager instances, forced to overlap at publication, converges on the same patch without error', async t => {
   const { repository, manager, config } = await fixture(t);
   const job = await admit(manager, repository);
   await writeFile(path.join(job.worktree, 'base.txt'), 'changed concurrently\n');
   const { job: completed } = await finish(manager, job);
-  const other = await new Manager({ ...config }, {}, { spawnWorker: false }).init();
-  const [a, b] = await Promise.all([manager.patch(completed.id), other.patch(completed.id)]);
+
+  // patch() takes the manager lock exactly twice: once to prepare/stage
+  // (phase 1) and once to publish (phase 2). Blocking every instance's
+  // *second* lock() call on a two-party barrier guarantees both have
+  // finished their own unlocked build before either is allowed to publish,
+  // rather than leaving the overlap to scheduling luck.
+  class OverlappingManager extends Manager {
+    constructor(barrier, ...args) { super(...args); this.barrier = barrier; this.lockCalls = 0; }
+    async lock(run) { this.lockCalls++; if (this.lockCalls === 2) await this.barrier(); return super.lock(run); }
+  }
+  const barrier = makeBarrier(2);
+  const a1 = await new OverlappingManager(barrier, { ...config }, {}, { spawnWorker: false }).init();
+  const b1 = await new OverlappingManager(barrier, { ...config }, {}, { spawnWorker: false }).init();
+  const [a, b] = await Promise.all([a1.patch(completed.id), b1.patch(completed.id)]);
   assert.equal(a.sha256, b.sha256);
   assert.equal(a.totalBytes, b.totalBytes);
   const again = await manager.patch(completed.id);
@@ -357,6 +438,32 @@ test('pi_cleanup never recreates a removed job directory, before or after a patc
   await manager.cleanup({ job_ids: [completedAfter.id], dry_run: false });
   await assert.rejects(manager.patch(completedAfter.id), /not found/i);
   await assert.rejects(fs.access(manager.jobDir(completedAfter.id)));
+});
+
+test('pi_cleanup running between the unlocked build phase and publication makes patch() reject without recreating the job or leaving a staging directory', async t => {
+  const { repository, manager, config } = await fixture(t);
+  const job = await admit(manager, repository);
+  await writeFile(path.join(job.worktree, 'base.txt'), 'changed for the cleanup race\n');
+  const { job: completed } = await finish(manager, job);
+
+  // patch()'s second lock() call is exactly the publish-phase acquisition,
+  // right after the unlocked build (completeAndRunDiff) has finished. Run a
+  // real pi_cleanup there, under its own separate lock cycle, before letting
+  // the original publish-phase callback proceed.
+  class CleanupRacingManager extends Manager {
+    constructor(...args) { super(...args); this.lockCalls = 0; }
+    async lock(run) {
+      this.lockCalls++;
+      if (this.lockCalls === 2) await this.cleanup({ job_ids: [completed.id], dry_run: false });
+      return super.lock(run);
+    }
+  }
+  const racing = await new CleanupRacingManager({ ...config }, {}, { spawnWorker: false }).init();
+  await assert.rejects(racing.patch(completed.id), /not found/i);
+  await assert.rejects(fs.access(manager.jobDir(completed.id)));
+  const stagingRoot = path.join(config.stateDir, 'patch-staging');
+  const remainingStaging = (await fs.readdir(stagingRoot).catch(() => [])).filter(name => /^patch-[0-9a-f-]{36}$/.test(name));
+  assert.deepEqual(remainingStaging, []);
 });
 
 test('a followup does not change the earlier job patch', async t => {
@@ -401,16 +508,26 @@ test('export-patch.mjs builds via manager.patch, verifies the cache with no-foll
   assert.doesNotMatch(source, /exportedAt/);
 });
 
-test('a different secret-named child env value changes the cache key and is masked in the patch', async t => {
+test('a different secret-named child env value changes the cache key and is masked in the patch, including a secret newly configured inside a binary public blob', async t => {
   const { repository, manager, config } = await fixture(t);
   const job = await admit(manager, repository);
   await writeFile(path.join(job.worktree, 'base.txt'), 'uses rotated-token-value-123\n');
+  // Not present at base, so this is a plain "added" binary candidate; the
+  // secret inside it is unknown at export time (plain manager's childEnv has
+  // no CORP_API_TOKEN) and only becomes a secret for the rotated manager
+  // below. Git would base85-encode these bytes, which defeats a literal
+  // string match against the final diff text, so the only place this can
+  // still be caught is the raw-byte recheck in stagePublicSide().
+  await fs.writeFile(path.join(job.worktree, 'secret.bin'), Buffer.concat([Buffer.from([0]), Buffer.from('rotated-token-value-123')]));
   const { job: completed } = await finish(manager, job);
   const plain = await manager.patch(completed.id);
   assert.match(plain.text, /rotated-token-value-123/);
+  assert.equal(plain.files.some(f => f.path === 'secret.bin'), true);
   const masked = await new Manager({ ...config }, { CORP_API_TOKEN: 'rotated-token-value-123' }, { spawnWorker: false }).init();
   const rotated = await masked.patch(completed.id);
   assert.notEqual(rotated.patchFile, plain.patchFile);
   assert.doesNotMatch(rotated.text, /rotated-token-value-123/);
   assert.equal(rotated.applicable, false);
+  assert.ok(rotated.notApplicableReasons.includes('secret_bearing_export_binary'), JSON.stringify(rotated.notApplicableReasons));
+  assert.equal(rotated.files.some(f => f.path === 'secret.bin'), false);
 });

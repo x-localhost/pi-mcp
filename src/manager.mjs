@@ -14,7 +14,7 @@ import { identityState, groupState, stopOwnedGroup, processIdentity } from './ow
 import { scanState } from './storage.mjs';
 import { normalizeImages } from './images.mjs';
 import { listArtifacts, readArtifact, restoreCheckpoint, snapshotArtifacts, manifestAt, readCheckpoint, validateArtifactConfig, textBytes, safeLstat, readRegular } from './artifacts.mjs';
-import { stagePublicSide, completeAndRunDiff, patchKey, sanitizeConfigDigest, pagePatch } from './patch.mjs';
+import { stagePublicSide, completeAndRunDiff, patchKey, sanitizeConfigDigest, pagePatch, isolatedGitEnv } from './patch.mjs';
 import { normalizeAcceptance, inheritAcceptance, evaluateAcceptance, contractDigest } from './acceptance.mjs';
 import { buildHandoff, extendAuthoritativeInstructions, shouldAutoRollover } from './session-transition.mjs';
 import { readWorkflowReferences } from './workflow.mjs';
@@ -226,12 +226,16 @@ export class Manager {
       return { pending: queued.filter(item => item.status === 'queued').length, changed };
     });
   }
-  async repository(input) {
+  // env defaults to the unfiltered child environment for every existing
+  // caller; patch() instead passes its own isolated git env, so an
+  // allowlisted GIT_DIR/GIT_WORK_TREE cannot redirect this validation's own
+  // `git rev-parse --show-toplevel` call away from the real repository root.
+  async repository(input, env = this.childEnv) {
     if (typeof input !== 'string' || !path.isAbsolute(input)) throw new Error('repository must be absolute');
     const repo = await fs.realpath(input);
     const roots = await Promise.all(this.config.allowedRoots.map(root => fs.realpath(root)));
     if (!roots.some(root => repo === root || repo.startsWith(root + path.sep))) throw new Error('Repository outside allowedRoots');
-    if (repo !== await fs.realpath(await git(repo, ['rev-parse', '--show-toplevel'], false, this.childEnv))) throw new Error('Use repository root');
+    if (repo !== await fs.realpath(await git(repo, ['rev-parse', '--show-toplevel'], false, env))) throw new Error('Use repository root');
     return repo;
   }
   async recover(job) {
@@ -631,6 +635,10 @@ export class Manager {
     if (new Set(ids).size !== ids.length) throw new Error('Duplicate job_ids');
     const mode = until === 'all' ? 'all' : 'any';
     const seconds = Math.min(Math.max(Number(waitSeconds) || 0, 0), 300);
+    // Already aborted before any job is even read: the caller is gone, so skip
+    // straight to stopping rather than paying for a round of status reads
+    // whose result (like every other return from an aborted call) is discarded.
+    if (signal?.aborted) return { until: mode, timedOut: true, elapsedSeconds: 0, settled: [], pending: [...ids], jobs: [] };
     const settledJobs = new Map(); const pendingJobs = new Map();
     for (const jobId of ids) {
       let job;
@@ -653,6 +661,11 @@ export class Manager {
         if (terminal.has(job.status) || job.status === 'quarantined') { pendingJobs.delete(jobId); settledJobs.set(jobId, job); }
         else pendingJobs.set(jobId, job);
       }));
+      // Each status read above awaits; the signal can abort while one is in
+      // flight. Re-check immediately afterward so a notification is never
+      // sent once the caller is already gone, even though this round's reads
+      // (and the settle bookkeeping already folded into them) still stand.
+      if (signal?.aborted) break;
       if (onProgress) {
         const elapsed = Math.floor((performance.now() - startedAt) / 1000);
         if (elapsed >= nextProgressAt) { await onProgress({ progress: elapsed, total: seconds, message: `${settledJobs.size}/${ids.length} settled` }); nextProgressAt = elapsed + 10; }
@@ -851,14 +864,16 @@ export class Manager {
       const manifest = await manifestAt(jobDir);
       if (manifest.manifestSha256 !== job.artifacts?.manifestSha256) throw new Error('Artifact manifest does not match job');
       if (manifest.sourceBaselineCommit !== job.baseCommit) throw new Error('Artifact manifest base mismatch');
-      const repository = await this.repository(job.repository);
+      // Isolated from this.childEnv so an allowlisted GIT_DIR/GIT_WORK_TREE
+      // cannot redirect this validation away from the real repository root.
+      const repository = await this.repository(job.repository, isolatedGitEnv(this.childEnv));
       const key = patchKey({ generator, baseCommit: job.baseCommit, manifestSha256: manifest.manifestSha256, sanitizeDigest });
       const cached = await readCached(jobDir, key);
       if (cached) return { cached, jobDir };
       const checkpoint = await readCheckpoint(jobDir);
       const stagingDir = path.join(stagingRoot, `patch-${randomUUID()}`);
       await fs.mkdir(stagingDir, { mode: 0o700 });
-      const { candidates, omittedPaths, reasons } = await stagePublicSide({ jobDir, manifest, checkpoint, stagingDir })
+      const { candidates, omittedPaths, reasons } = await stagePublicSide({ jobDir, manifest, checkpoint, stagingDir, sanitize, env: this.childEnv, secrets })
         .catch(async error => { await fs.rm(stagingDir, { recursive: true, force: true }); throw error; });
       return { jobDir, repository, baseCommit: job.baseCommit, manifest, stagingDir, candidates, omittedPaths, reasons, key };
     });
@@ -870,10 +885,17 @@ export class Manager {
     finally { await fs.rm(stagingDir, { recursive: true, force: true }); }
     const allReasons = new Set([...reasons, ...result.reasons]);
     if (!manifest.exportComplete) allReasons.add('export_incomplete');
+    const omittedList = [...omittedPaths];
     const descriptor = { version: 1, generator, key, manifestSha256: manifest.manifestSha256, baseCommit, sha256: sha(result.bytes),
       totalBytes: result.bytes.length, encoding: textBytes(result.bytes) === null ? 'base64' : 'utf8', applicable: allReasons.size === 0,
       notApplicableReasons: [...allReasons].sort(), files: result.files.slice(0, 256), filesTruncated: result.files.length > 256,
-      omittedPaths: [...omittedPaths], inputSnapshotDigest: manifest.inputSnapshotDigest, inputMaterialsDigest: manifest.inputMaterialsDigest };
+      omittedPaths: omittedList.slice(0, 200), omittedPathsTruncated: omittedList.length > 200, omittedCount: omittedList.length,
+      inputSnapshotDigest: manifest.inputSnapshotDigest, inputMaterialsDigest: manifest.inputMaterialsDigest };
+    // files and omittedPaths are both capped above so the published descriptor
+    // stays well under readCached()'s own 1 MiB read bound for patch.json and
+    // meta-<key>.json; this is the backstop that keeps that true even if a
+    // cap or entry shape changes later, instead of writing an unreadable cache.
+    if (Buffer.byteLength(JSON.stringify(descriptor)) > 900 * 1024) throw new Error('Patch descriptor exceeds cache bound');
     const published = await this.lock(async () => {
       await this.read(id).catch(() => { throw new Error('Job not found'); });
       const latest = await manifestAt(jobDir).catch(() => null);
@@ -905,7 +927,8 @@ export class Manager {
       applicableMeaning: 'complete, unredacted patch of supported exported source changes relative to baseCommit; not proof of target compatibility, verification, acceptance or review',
       notApplicableReasons: descriptor.notApplicableReasons, totalBytes: descriptor.totalBytes, sha256: descriptor.sha256,
       encoding: page.encoding, offset, nextOffset: page.nextOffset, eof: page.eof, files: descriptor.files, filesTruncated: descriptor.filesTruncated,
-      omittedPaths: descriptor.omittedPaths, inputSnapshotDigest: descriptor.inputSnapshotDigest, inputMaterialsDigest: descriptor.inputMaterialsDigest,
+      omittedPaths: descriptor.omittedPaths, omittedPathsTruncated: !!descriptor.omittedPathsTruncated, omittedCount: descriptor.omittedCount ?? descriptor.omittedPaths.length,
+      inputSnapshotDigest: descriptor.inputSnapshotDigest, inputMaterialsDigest: descriptor.inputMaterialsDigest,
       patchFile: path.join(jobDir, 'patch', `changes-${descriptor.key}.patch`),
       patchFileNote: 'server path; not visible from the host in the internal Docker profile; save and verify sha256 before pi_cleanup' };
     return includeText ? { ...base, text: page.text } : base;
