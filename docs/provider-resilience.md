@@ -86,3 +86,32 @@ reason, delayMs }` event through `pi_events`.
 
 Exhausting recovery fails the job with
 `Provider returned <reason> (recovery exhausted after N attempts)`.
+
+## Idle timeout across a recovery backoff
+
+The worker records `lastPromptAt` whenever it sends a prompt (the initial
+one or a continuation) and uses the *later* of that and
+`lastProgressAt`/`startedAt` as the baseline for the observation
+`idleTimeoutMs` check. Without this, a backoff longer than `idleTimeoutMs`
+left the idle check comparing against progress evidence from before the
+backoff, so the job could be stopped as `idle_timeout` the instant the
+continuation prompt was sent — before Pi had any chance to answer it.
+
+## Steering during a recovery backoff
+
+A `pi_steer` call sent while the worker is waiting out a recovery backoff
+(between a recoverable anomaly and the next continuation prompt) is accepted
+and forwarded to Pi immediately, the same as a steer sent mid-run; it is not
+deferred to "unknown" just because no turn is currently streaming. This was
+verified against the Pi 1.4.0 source (`@earendil-works/pi-coding-agent`):
+`AgentSession.steer()` always calls the low-level `Agent.steer()`, which
+unconditionally enqueues onto `steeringQueue` with no precondition on an
+active run; the next `prompt()` call (used by the continuation) drains that
+queue via its initial steering poll and runs the queued message alongside
+the continuation prompt in that turn's first LLM call. So queuing a steer
+while idle during the backoff is safe and still gets delivered, instead of
+sitting unseen until a steer sent during streaming would have been. The
+worker only allows this specifically during the bounded backoff window
+(after a recoverable anomaly, before a guaranteed next continuation prompt);
+once a run has settled for good — healthy, or recovery exhausted — steering
+is refused again, since no further prompt will ever drain the queue.

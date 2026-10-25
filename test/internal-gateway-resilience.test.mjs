@@ -225,7 +225,76 @@ test('malformed data line after commit destroys the client connection without fo
     // cutting the connection instead of forwarding garbage means that never arrives.
     assert.equal(result.raw.endsWith('0\r\n\r\n'), false, 'the connection must be cut, not cleanly finished');
     assert.equal(requestImpl.calls.length, 1);
-    assert.equal(f.gateway.auditSnapshot()[0].attempts, 1);
+    const audit = f.gateway.auditSnapshot();
+    assert.equal(audit[0].attempts, 1);
+    // A post-commit cut destroys the client response (res.destroy()) rather
+    // than ending it cleanly; the audit entry must reflect that the request
+    // was aborted, not treated as a normal completion.
+    assert.equal(audit[0].completed, false);
+    assert.equal(audit[0].aborted, true);
+  } finally { await f.close(); }
+});
+
+test('non-stream refusal message is treated as meaningful and forwarded without retry', async () => {
+  const requestImpl = sequencedRequestImpl([
+    { statusCode: 200, headers: { 'content-type': 'application/json' }, chunks: ['{"choices":[{"message":{"refusal":"I cannot help with that."}}]}'] },
+    { statusCode: 200, headers: { 'content-type': 'application/json' }, chunks: ['{"choices":[{"message":{"content":"ok"}}]}'] },
+  ]);
+  const f = await fixture({ rawConfig: { ...base, retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 } }, requestImpl });
+  try {
+    const result = await f.call(plainBody);
+    assert.equal(result.status, 200);
+    assert.equal(JSON.parse(result.body).choices[0].message.refusal, 'I cannot help with that.');
+    assert.equal(requestImpl.calls.length, 1, 'a non-empty refusal is a real answer; it must not be retried');
+    assert.equal(f.gateway.auditSnapshot()[0].category, 'ok');
+  } finally { await f.close(); }
+});
+
+test('SSE refusal delta is treated as meaningful and committed without retry', async () => {
+  const requestImpl = sequencedRequestImpl([
+    { statusCode: 200, headers: { 'content-type': 'text/event-stream' }, chunks: ['data: {"choices":[{"delta":{"refusal":"I cannot help with that."}}]}\n\n', 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n', 'data: [DONE]\n\n'] },
+    { statusCode: 200, headers: { 'content-type': 'text/event-stream' }, chunks: ['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', 'data: [DONE]\n\n'] },
+  ]);
+  const f = await fixture({ rawConfig: { ...base, retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 } }, requestImpl });
+  try {
+    const result = await f.call(streamBody);
+    assert.equal(result.status, 200);
+    assert.ok(result.body.includes('"refusal":"I cannot help with that."'));
+    assert.equal(requestImpl.calls.length, 1, 'a non-empty refusal delta is a real answer; it must not be retried');
+    assert.equal(f.gateway.auditSnapshot()[0].category, 'ok');
+  } finally { await f.close(); }
+});
+
+test('an SSE line left incomplete past the 1 MiB pre-commit bound is treated as malformed and retried', { timeout: 3000 }, async () => {
+  // Deliberately no trailing newline: the per-line MAX_SSE_BUFFER checks
+  // only ever look at *complete* lines, so without a bound on the pending,
+  // still-incomplete line itself this would buffer forever (the upstream
+  // here never ends on its own, so nothing else would ever unblock it).
+  const hugeIncompleteLine = `data: ${'a'.repeat(1024 * 1024 + 4096)}`;
+  const requestImpl = sequencedRequestImpl([
+    { statusCode: 200, headers: { 'content-type': 'text/event-stream' }, chunks: [hugeIncompleteLine], noEnd: true },
+    { statusCode: 200, headers: { 'content-type': 'text/event-stream' }, chunks: ['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', 'data: [DONE]\n\n'] },
+  ]);
+  const f = await fixture({ rawConfig: { ...base, retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 } }, requestImpl });
+  try {
+    const result = await f.call(streamBody);
+    assert.equal(result.status, 200);
+    assert.ok(result.body.includes('"content":"ok"'));
+    assert.equal(requestImpl.calls.length, 2, 'the oversized incomplete line must be retried promptly, not left buffering forever');
+  } finally { await f.close(); }
+});
+
+test('an SSE line left incomplete past the 1 MiB bound after commit cuts the connection instead of buffering forever', { timeout: 3000 }, async () => {
+  const hugeIncompleteLine = `data: ${'b'.repeat(1024 * 1024 + 4096)}`;
+  const requestImpl = sequencedRequestImpl([
+    { statusCode: 200, headers: { 'content-type': 'text/event-stream' }, chunks: ['data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n', hugeIncompleteLine], noEnd: true },
+  ]);
+  const f = await fixture({ rawConfig: { ...base, retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 } }, requestImpl });
+  try {
+    const result = await f.callRawSocket(streamBody);
+    assert.ok(result.raw.includes('"content":"Hello"'), 'good content before the oversized incomplete line should have been forwarded');
+    assert.equal(result.raw.endsWith('0\r\n\r\n'), false, 'the connection must be cut, not cleanly finished');
+    assert.equal(requestImpl.calls.length, 1, 'a post-commit cut must not be retried');
   } finally { await f.close(); }
 });
 
