@@ -291,7 +291,7 @@ All runs were on gram with image `pi-mcp-cck:base-20261026` (`node:24.22.0-bookw
 | Review fixes round 1 `8f40dbd` | 504/504 |
 | Round 2 `4124ba3` | 508/508 |
 | Round 3 `f9af8bf` | 517/517 |
-| Final `4eb3974` | see handoff |
+| Final source `4eb3974` | 517/517 |
 
 Units:
 - Kit (Unit B) was built by GPT-6 Luna (bridge `luna_worker`, job `task-76ed3783`). The lead moved the operations section and added the subagent usage example.
