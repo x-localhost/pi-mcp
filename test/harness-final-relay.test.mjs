@@ -18,13 +18,16 @@ test('relay carries only valid chat trace trio to gateway and never forwards pri
     peer.on('finish', () => {
       const response = new PassThrough();
       response.statusCode = 200; response.headers = { 'content-type': 'application/json' };
-      callback(response); response.end('{}');
+      callback(response); response.end('{"choices":[{"message":{"content":"ok"}}]}');
     });
     return peer;
   };
+  // Retry is on by default; pinned to one attempt here since this test is
+  // about relay trace-header plumbing, not retry behaviour, and its upstream
+  // call count must stay exactly one.
   const gateway = await startGateway({ config: validateGatewayConfig({
     upstreamUrl: 'https://llm.corp.invalid/v1/chat/completions', upstreamAddress: '10.2.3.4', model: 'mock',
-    limits: { maxOutputTokens: 128 }
+    limits: { maxOutputTokens: 128 }, retry: { maxAttempts: 1 }
   }), socketPath, requestImpl });
   const relay = await startRelay({ socketPath, port: 0 });
   const body = JSON.stringify({ model: 'mock', messages: [{ role: 'user', content: 'hello' }] });

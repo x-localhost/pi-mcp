@@ -8,7 +8,11 @@ import { tmpdir } from 'node:os';
 import { validateGatewayConfig, startGateway } from '../internal-agent/gateway.mjs';
 
 test('gateway validates diagnostic UUIDs and consumes them before upstream', async () => {
-  const config = { upstreamUrl: 'https://llm.corp.invalid/v1/chat/completions', upstreamAddress: '10.2.3.4', model: 'mock', limits: { maxOutputTokens: 128 } };
+  // Retry is on by default; pinned to one attempt here since this test is
+  // about diagnostic UUID/audit-trail and overlap-dedup plumbing, not retry
+  // behaviour, and its upstream call count must stay exactly one per client
+  // call.
+  const config = { upstreamUrl: 'https://llm.corp.invalid/v1/chat/completions', upstreamAddress: '10.2.3.4', model: 'mock', limits: { maxOutputTokens: 128 }, retry: { maxAttempts: 1 } };
   assert.throws(() => validateGatewayConfig({ ...config, headers: { 'X-Pi-Job-Id': 'anything' } }), /invalid gateway configuration/i);
   const dir = await mkdtemp(join(tmpdir(), 'harness-gateway-'));
   const socketPath = join(dir, 'gateway.sock');
@@ -21,7 +25,7 @@ test('gateway validates diagnostic UUIDs and consumes them before upstream', asy
     req.on('finish', () => {
       const respond = () => { const reply = new PassThrough();
         reply.statusCode = 200; reply.headers = { 'content-type': 'application/json' };
-        callback(reply); reply.end('{}'); };
+        callback(reply); reply.end('{"choices":[{"message":{"content":"ok"}}]}'); };
       if (upstream.length === 3) releaseFirstOverlap = respond;
       else { respond(); if (upstream.length === 4) releaseFirstOverlap(); }
     });

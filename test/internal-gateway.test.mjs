@@ -90,7 +90,10 @@ test('schema references stay within local fragments for all ref keywords', () =>
   }
 });
 
-async function fixture(response = { statusCode: 200, headers: { 'content-type': 'text/event-stream', 'set-cookie': 'secret=1', location: 'https://evil.example' }, chunks: ['data: one\n\n', 'data: two\n\n'] }, rawConfig = base) {
+// Retry/validation is on by default now, so a success-case default response
+// must be a real completion (not placeholder text) or it would be retried
+// and ultimately answered 503 instead of 200.
+async function fixture(response = { statusCode: 200, headers: { 'content-type': 'text/event-stream', 'set-cookie': 'secret=1', location: 'https://evil.example' }, chunks: ['data: {"choices":[{"delta":{"content":"one"}}]}\n\n', 'data: [DONE]\n\n'] }, rawConfig = base) {
   const dir = await mkdtemp(join(tmpdir(), 'gateway-test-'));
   const socketPath = join(dir, 'gateway.sock');
   const seen = [];
@@ -158,7 +161,7 @@ test('gateway strips client headers, pins upstream and streams success with mini
   try {
     const result = await f.call('POST', '/v1/chat/completions', JSON.stringify(body), { host: 'evil.example', authorization: 'Bearer attacker', 'proxy-authorization': 'proxy-secret', 'x-forwarded-host': 'evil.example', 'content-type': 'application/json' });
     assert.equal(result.status, 200);
-    assert.equal(result.body, 'data: one\n\ndata: two\n\n');
+    assert.equal(result.body, 'data: {"choices":[{"delta":{"content":"one"}}]}\n\ndata: [DONE]\n\n');
     assert.equal(result.headers['content-type'], 'text/event-stream');
     assert.equal(result.headers['set-cookie'], undefined);
     assert.equal(result.headers.location, undefined);
@@ -175,7 +178,7 @@ test('gateway strips client headers, pins upstream and streams success with mini
 });
 
 test('administrator prefix changes only the fixed upstream path', async () => {
-  const f = await fixture({ statusCode: 200, headers: { 'content-type': 'application/json' }, chunks: ['{}'] }, { ...base, upstreamUrl: 'https://llm.corp.example:9443/api/v1/chat/completions' });
+  const f = await fixture({ statusCode: 200, headers: { 'content-type': 'application/json' }, chunks: ['{"choices":[{"message":{"content":"ok"}}]}'] }, { ...base, upstreamUrl: 'https://llm.corp.example:9443/api/v1/chat/completions' });
   try {
     assert.equal((await f.call('POST', '/v1/chat/completions', JSON.stringify(body))).status, 200);
     assert.equal(f.seen[0].options.path, '/api/v1/chat/completions');
@@ -185,23 +188,33 @@ test('administrator prefix changes only the fixed upstream path', async () => {
 });
 
 test('upstream redirects and errors return generic text without upstream reflection', async () => {
-  for (const statusCode of [302, 401, 500]) {
-    const f = await fixture({ statusCode, headers: { location: 'https://evil.example', 'set-cookie': 'secret=1' }, chunks: ['upstream-secret'] });
+  // This test is about a single upstream attempt's failure, not retry
+  // behaviour, so maxAttempts is pinned to 1. 302/401 are never retried
+  // regardless of maxAttempts, so they still answer immediately as 502; 500
+  // is retryable by category, so exhausting the one allowed attempt reports
+  // its own exhaustion as 503 rather than reflecting the upstream status
+  // directly as 502 (matching "503 then 200 is retried" semantics elsewhere).
+  for (const [statusCode, expectedStatus] of [[302, 502], [401, 502], [500, 503]]) {
+    const f = await fixture({ statusCode, headers: { location: 'https://evil.example', 'set-cookie': 'secret=1' }, chunks: ['upstream-secret'] }, { ...base, retry: { maxAttempts: 1 } });
     try {
       const result = await f.call('POST', '/v1/chat/completions', JSON.stringify(body));
-      assert.equal(result.status, 502);
+      assert.equal(result.status, expectedStatus);
       assert.equal(result.body.includes('upstream-secret'), false);
       assert.equal(result.headers.location, undefined);
       assert.equal(result.headers['set-cookie'], undefined);
+      assert.equal(f.seen.length, 1);
     } finally { await f.close(); }
   }
 });
 
 test('upstream idle timeout returns a generic error', async () => {
-  const f = await fixture({ hang: true });
+  // A timeout before headers is retryable by category; maxAttempts is
+  // pinned to 1 so this test stays about one upstream attempt. Exhausting
+  // that one allowed attempt reports 503 (see the comment above), not 502.
+  const f = await fixture({ hang: true }, { ...base, retry: { maxAttempts: 1 } });
   try {
     const result = await f.call('POST', '/v1/chat/completions', JSON.stringify(body));
-    assert.equal(result.status, 502);
+    assert.equal(result.status, 503);
     assert.equal(result.body, 'Upstream unavailable\n');
   } finally { await f.close(); }
 });
