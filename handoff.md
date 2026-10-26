@@ -10,6 +10,7 @@
 - 독립 리뷰: Astra 4회차 승인(차단 0). 1–3회차에서 비밀값 노출 경로(바이너리·8진 인용 파일명·auth/models 자격증명)와 크기 한도·취소·누락 집계를 지적받아 모두 수정.
 - 남은 한계: 실제 Claude Code 세션 구동, 실제 사내 LLM, 실제 compose 스택에서의 `export-patch.mjs`는 미검증. 활성 빌드 중 정리 경합 테스트는 스케줄링 의존(구조상 안전 근거는 결과 문서에 기록).
 - 운영 메모: gram `/home` 100% → Docker 빌드 시 `DOCKER_CONFIG=/tmp/...` 사용. `run-suite.sh`의 tar는 `--no-same-owner --no-overwrite-dir`가 필요(없으면 approved-mcp 테스트 2건 실패).
+- 원격: 2026-10-26 사용자 요청으로 공개 저장소 https://github.com/x-localhost/pi-mcp 를 만들고 `main`을 push(`384a2af`, origin 추적). 비밀값 검사 통과; 문서에 로컬 경로·`gram` 별칭 포함.
 - 다음 단계: 원하면 `examples/claude-code`의 에이전트·스킬을 사용 프로젝트의 `.claude/`(또는 `~/.claude/`)에 복사하고 `claude mcp add`로 서버 등록 후 실제 작업 1건으로 확인.
 
 ## 작업 기록
@@ -18,7 +19,7 @@
 - `pi_wait`(다중 대기)·`pi_patch`(적용 가능한 전체 패치, 사내 반출 스크립트)·압축 JSON·Claude Code 에이전트/스킬/안내 추가.
 - Astra 리뷰 4회(3회 반려 후 승인)로 패치 비밀값 노출 경로 등 수정; 작업 `5136593`(소스 `4eb3974`).
 - 전체 517/517(gram), 단위 RED/GREEN·안정성 3회. 실제 Claude Code·사내 환경 구동은 미검증.
-- 원격 작업 자원 정리, live/global 설정·push·배포 변경 없음.
+- 원격 작업 자원 정리, live/global 설정·배포 변경 없음. 이후 요청으로 공개 GitHub 저장소에 `main` push.
 
 ### 2026-10-25 — 사내 LLM 빈·비정상 응답 대응과 전체 소스 리뷰 수정
 - worker 이어가기 복구(`providerRecovery`)와 gateway 사전 검증·재시도 추가, 마지막 응답이 비어도 성공 처리되던 구멍 차단.
